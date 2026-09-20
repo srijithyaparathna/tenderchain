@@ -69,7 +69,9 @@ export function TenderListPage() {
         <div className="py-20 text-center text-sm text-slate-400">Loading tenders…</div>
       ) : filtered.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 py-16 text-center text-sm text-slate-400">
-          No tenders match these filters.
+          {tenders.length === 0
+            ? 'No tenders published yet.'
+            : 'No tenders match these filters.'}
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">

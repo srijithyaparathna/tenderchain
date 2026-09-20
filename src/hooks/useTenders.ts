@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Tender } from '../types';
-import { chainApi } from '../services/mockChainApi';
+import { chainApi } from '../services/api';
 
 export function useTenders() {
   const [tenders, setTenders] = useState<Tender[]>([]);

@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { Card, CardBody, CardHeader } from '../components/common/Card';
 import { useApp } from '../state/AppContext';
 import { useTenders } from '../hooks/useTenders';
-import { chainApi } from '../services/mockChainApi';
-import type { BidMode, Criterion, TenderKind } from '../types';
+import { chainApi } from '../services/api';
+import type { BidMode, ChainConstants, Criterion, TenderKind } from '../types';
 import { TENDER_KIND_LABEL } from '../types';
 import { weightSum } from '../lib/gates';
 import { blocksToDuration, formatBlock } from '../lib/blocks';
@@ -18,6 +18,39 @@ interface GateForm {
   openingAt: number;
   openingEndAt: number;
   standstillPeriod: number;
+}
+
+/**
+ * A whole-lifecycle schedule you can sit through in about 15 minutes at 6s
+ * blocks, anchored on `now` (the live head).
+ *
+ * Gates are absolute block numbers, so a schedule is only meaningful relative
+ * to the block it was computed from — that is why this is re-derived from the
+ * head until the officer edits a gate by hand, rather than computed once when
+ * the wizard mounted (at which point the first head may not even have arrived
+ * and `currentBlock` is still 0).
+ *
+ * `openingEndAt - openingAt` is the one gap that cannot be compressed: the
+ * pallet rejects `open_tender` with `RevealWindowTooShort` below
+ * `MinRevealWindow` (100 blocks ≈ 10 min on this runtime), so it takes the
+ * bulk of the 15 minutes and everything else is squeezed around it.
+ */
+function testRunGates(now: number, constants: ChainConstants | null): GateForm {
+  const reveal = (constants?.minRevealWindow ?? 100) + 5;
+  const submissionClose = 30; // ~3 min: publish, ask a question, get a bid in
+  return {
+    publishAt: now + 2,
+    questionsCloseAt: now + 12,
+    submissionCloseAt: now + submissionClose,
+    openingAt: now + submissionClose,
+    openingEndAt: now + submissionClose + reveal,
+    standstillPeriod: Math.max(constants?.minStandstillPeriod ?? 0, 10),
+  };
+}
+
+/** Blocks from `now` to the last gate a full run has to wait out. */
+function runLength(gates: GateForm, now: number): number {
+  return Math.max(0, gates.openingEndAt + gates.standstillPeriod - now);
 }
 
 export function CreateTenderWizard() {
@@ -44,14 +77,16 @@ export function CreateTenderWizard() {
     { id: 'c3', name: 'Past performance', description: '', weight: 20, maxScore: 100 },
   ]);
 
-  const [gates, setGates] = useState<GateForm>({
-    publishAt: currentBlock + 50,
-    questionsCloseAt: currentBlock + 1000,
-    submissionCloseAt: currentBlock + 2000,
-    openingAt: currentBlock + 2050,
-    openingEndAt: currentBlock + 2250,
-    standstillPeriod: 150,
-  });
+  // Gates are only *state* once the officer has typed their own numbers in.
+  // Until then they are derived from the live head on every render, so the
+  // schedule stays correct however long the earlier steps take to fill in —
+  // these are absolute block numbers, and one computed when the wizard mounted
+  // (possibly before the first head arrived, at block 0) would be stale or
+  // already in the past by the time Create is clicked.
+  const [pinnedGates, setPinnedGates] = useState<GateForm | null>(null);
+  const autoGates = useMemo(() => testRunGates(currentBlock, constants), [currentBlock, constants]);
+  const gates = pinnedGates ?? autoGates;
+  const gatesPinned = pinnedGates !== null;
 
   const [credentials, setCredentials] = useState('');
   const [minReputation, setMinReputation] = useState(0);
@@ -230,7 +265,7 @@ export function CreateTenderWizard() {
                         <input
                           type="number"
                           value={gates[key]}
-                          onChange={(e) => setGates({ ...gates, [key]: Number(e.target.value) })}
+                          onChange={(e) => setPinnedGates({ ...gates, [key]: Number(e.target.value) })}
                           className="input w-40"
                         />
                         <span className="text-xs text-slate-400">
@@ -239,11 +274,49 @@ export function CreateTenderWizard() {
                       </div>
                     </Field>
                   ))}
+                  <div className={`rounded-md border border-dashed p-3 ${gatesPinned ? 'border-slate-300' : 'border-emerald-300 bg-emerald-50/40'}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-slate-700">
+                        {gatesPinned ? 'Gates pinned to the numbers you typed' : '⚡ Auto: ~15-minute test run'}
+                      </span>
+                      {gatesPinned && (
+                        <button
+                          type="button"
+                          onClick={() => setPinnedGates(null)}
+                          className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
+                        >
+                          ↺ Back to the 15-minute test gates
+                        </button>
+                      )}
+                    </div>
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      {gatesPinned ? (
+                        <>
+                          These are absolute block numbers and will not move again — the chain is at{' '}
+                          {formatBlock(currentBlock)} now, so re-read them before you hit Create.
+                        </>
+                      ) : (
+                        <>
+                          Every gate is re-derived from the live head ({formatBlock(currentBlock)}) on each new block, so
+                          it stays correct however long you spend on the earlier steps. Type in any field above to pin
+                          your own numbers instead.
+                        </>
+                      )}{' '}
+                      The reveal window still has to clear MinRevealWindow ({constants?.minRevealWindow ?? 100} blocks ≈{' '}
+                      {blocksToDuration(constants?.minRevealWindow ?? 100, constants?.avgBlockTimeSeconds ?? 6)}), which
+                      is the one gap that cannot be compressed — it is most of the 15 minutes.
+                    </p>
+                    <p className="mt-1.5 text-xs font-medium text-slate-600">
+                      Full run, create → Contracted: {runLength(gates, currentBlock).toLocaleString()} blocks ≈{' '}
+                      {blocksToDuration(runLength(gates, currentBlock), constants?.avgBlockTimeSeconds ?? 6)}
+                    </p>
+                  </div>
+
                   <Field label="Standstill period (blocks, after award approval)">
                     <input
                       type="number"
                       value={gates.standstillPeriod}
-                      onChange={(e) => setGates({ ...gates, standstillPeriod: Number(e.target.value) })}
+                      onChange={(e) => setPinnedGates({ ...gates, standstillPeriod: Number(e.target.value) })}
                       className="input w-40"
                     />
                   </Field>
@@ -253,7 +326,7 @@ export function CreateTenderWizard() {
                       {gateErrors.map((e) => <li key={e}>• {e}</li>)}
                     </ul>
                   )}
-                  {gateErrors.length === 0 && lowBuffer && (
+                  {gateErrors.length === 0 && gatesPinned && lowBuffer && (
                     <p className="rounded-md bg-amber-50 p-3 text-xs text-amber-700">
                       ⚠ Only {buffer.toLocaleString()} blocks between now and submission close — consider more buffer for bidders to respond.
                     </p>
@@ -292,6 +365,13 @@ export function CreateTenderWizard() {
                   <SummaryRow label="Criteria" value={criteria.map((c) => `${c.name} (${c.weight}%)`).join(', ')} />
                   <SummaryRow label="Gates" value={`publish #${gates.publishAt} → Q&A close #${gates.questionsCloseAt} → submission close #${gates.submissionCloseAt} → opening #${gates.openingAt}-${gates.openingEndAt}`} />
                   <SummaryRow label="Standstill" value={`${gates.standstillPeriod} blocks`} />
+                  <SummaryRow
+                    label="Full run"
+                    value={`${runLength(gates, currentBlock).toLocaleString()} blocks ≈ ${blocksToDuration(
+                      runLength(gates, currentBlock),
+                      constants?.avgBlockTimeSeconds ?? 6,
+                    )} from now${gatesPinned ? '' : ' — gates still tracking the live head'}`}
+                  />
                   <SummaryRow label="Eligibility" value={credentials || 'None'} />
                   <SummaryRow label="Bond" value={`${bondAmount} ${bondCurrency}${forfeitOnWithdrawal ? ' (forfeit on withdrawal)' : ''}`} />
                   <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-500">

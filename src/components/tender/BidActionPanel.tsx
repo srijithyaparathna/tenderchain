@@ -5,8 +5,8 @@ import { RoleGatedButton } from '../common/RoleGatedButton';
 import { HashTag } from '../common/HashTag';
 import { useApp } from '../../state/AppContext';
 import { requireBidder } from '../../lib/permissions';
-import { chainApi } from '../../services/mockChainApi';
-import { mockHash, randomSalt, commitmentHash } from '../../lib/hashing';
+import { chainApi } from '../../services/api';
+import { contentHash, randomSalt } from '../../lib/hashing';
 import { loadLocalSealedBid, saveLocalSealedBid, clearLocalSealedBid, type LocalSealedBid } from '../../lib/localBidStore';
 
 interface LineItem { id: string; description: string; qty: number; unitPrice: number }
@@ -72,9 +72,11 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
   const myCommitment = tender.commitments.find((c) => c.bidder === currentAccount.address && !c.withdrawn);
   const myRevealedBid = tender.revealedBids.find((b) => b.bidder === currentAccount.address);
   const local = loadLocalSealedBid(tender.id, currentAccount.address);
-  const documentsHash = docsLabel ? mockHash(docsLabel) : '';
+  const documentsHash = docsLabel ? contentHash(docsLabel) : '';
   const totalPrice = items.reduce((s, i) => s + i.qty * i.unitPrice, 0);
-  const previewCommitment = documentsHash && salt ? commitmentHash(currentAccount.address, documentsHash, totalPrice, salt) : '';
+  const buildCommitment = (docs: string, lines: LineItem[], s: string) =>
+    docs && s ? (chainApi.buildCommitment?.(currentAccount.address, docs, lines, s) ?? '') : '';
+  const previewCommitment = buildCommitment(documentsHash, items, salt);
 
   // ---- OPEN MODE ----
   if (tender.bidMode === 'Open') {
@@ -82,7 +84,7 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
     const submit = async () => {
       setBusy(true);
       try {
-        await chainApi.submitOpenBid(tender.id, currentAccount.address, { documentsHash: documentsHash || mockHash(`${tender.id}-${Date.now()}`), priceLineItems: items });
+        await chainApi.submitOpenBid(tender.id, currentAccount.address, { documentsHash: documentsHash || contentHash(`${tender.id}-${Date.now()}`), priceLineItems: items });
       } finally {
         setBusy(false);
       }
@@ -132,7 +134,11 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
       if (!source) return;
       setBusy(true);
       try {
-        await chainApi.revealBid(tender.id, currentAccount.address, { documentsHash: source.documentsHash, priceLineItems: source.priceLineItems });
+        await chainApi.revealBid(tender.id, currentAccount.address, {
+          documentsHash: source.documentsHash,
+          priceLineItems: source.priceLineItems,
+          salt: source.salt,
+        });
         clearLocalSealedBid(tender.id, currentAccount.address);
       } finally {
         setBusy(false);
@@ -152,7 +158,7 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
                 <div>Documents hash: <HashTag hash={local.documentsHash} explain="Must match the hash used at commit time." /></div>
                 <div>Total price: <span className="font-medium">{local.totalPrice.toLocaleString()}</span></div>
                 <div>Salt: <span className="mono text-xs">{local.salt}</span></div>
-                <div>Commitment (recomputed): <HashTag hash={commitmentHash(currentAccount.address, local.documentsHash, local.totalPrice, local.salt)} explain="Recomputed from the details above — must equal your on-chain commitment hash for the reveal to be accepted." /></div>
+                <div>Commitment (recomputed): <HashTag hash={buildCommitment(local.documentsHash, local.priceLineItems, local.salt)} explain="Recomputed from the details above — must equal your on-chain commitment hash for the reveal to be accepted." /></div>
               </div>
               <RoleGatedButton disabled={busy} onClick={reveal}>Reveal bid</RoleGatedButton>
             </>

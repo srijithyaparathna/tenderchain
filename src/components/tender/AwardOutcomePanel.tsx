@@ -3,7 +3,7 @@ import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
 import { useApp } from '../../state/AppContext';
 import { requireGovernance } from '../../lib/permissions';
-import { chainApi } from '../../services/mockChainApi';
+import { chainApi } from '../../services/api';
 import { formatBlock } from '../../lib/blocks';
 import { useState } from 'react';
 

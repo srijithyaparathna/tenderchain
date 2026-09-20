@@ -21,18 +21,24 @@ function applyAutoTransitions(t: Tender, block: number): Tender {
   return state === t.state ? t : { ...t, state };
 }
 
-class MockChainApi implements ChainApi {
-  private tenders: Tender[] = clone(SEED_TENDERS);
-  private blockSubs = new Set<(b: number) => void>();
-  private tenderSubs = new Set<(t: Tender[]) => void>();
-  constructor() {
+export class MockChainApi implements ChainApi {
+  protected tenders: Tender[] = clone(SEED_TENDERS);
+  protected blockSubs = new Set<(b: number) => void>();
+  protected tenderSubs = new Set<(t: Tender[]) => void>();
+
+  // `simulateClock: false` hands the clock to a subclass that drives `onBlock`
+  // from real chain heads instead (see `liveChainApi.ts`).
+  constructor({ simulateClock = true }: { simulateClock?: boolean } = {}) {
+    if (!simulateClock) return;
     // Simulate ~1 block per 4s so countdowns and gates visibly move during a demo.
-    window.setInterval(() => {
-      const block = tickBlock();
-      this.blockSubs.forEach((cb) => cb(block));
-      this.tenders = this.tenders.map((t) => applyAutoTransitions(t, block));
-      this.tenderSubs.forEach((cb) => cb(clone(this.tenders)));
-    }, 4000);
+    window.setInterval(() => this.onBlock(tickBlock()), 4000);
+  }
+
+  /** Fan a new block height out to subscribers and re-run block-gated transitions. */
+  protected onBlock(block: number) {
+    this.blockSubs.forEach((cb) => cb(block));
+    this.tenders = this.tenders.map((t) => applyAutoTransitions(t, block));
+    this.tenderSubs.forEach((cb) => cb(clone(this.tenders)));
   }
 
   async getConstants(): Promise<ChainConstants> {
@@ -40,6 +46,10 @@ class MockChainApi implements ChainApi {
   }
 
   getCurrentBlock(): number {
+    return nowBlock();
+  }
+
+  getFinalizedBlock(): number {
     return nowBlock();
   }
 
@@ -52,7 +62,12 @@ class MockChainApi implements ChainApi {
     return clone(ACCOUNTS);
   }
 
-  private snapshot(): Tender[] {
+  subscribeAccounts(cb: (accounts: AccountRef[]) => void): () => void {
+    cb(clone(ACCOUNTS));
+    return () => {};
+  }
+
+  protected snapshot(): Tender[] {
     const block = this.getCurrentBlock();
     this.tenders = this.tenders.map((t) => applyAutoTransitions(t, block));
     return clone(this.tenders);
@@ -71,14 +86,14 @@ class MockChainApi implements ChainApi {
     return () => this.tenderSubs.delete(cb);
   }
 
-  private mutate(id: string, fn: (t: Tender) => void) {
+  protected mutate(id: string, fn: (t: Tender) => void) {
     const t = this.tenders.find((x) => x.id === id);
     if (!t) throw new Error(`Unknown tender ${id}`);
     fn(t);
     this.tenderSubs.forEach((cb) => cb(clone(this.tenders)));
   }
 
-  private notifyAll() {
+  protected notifyAll() {
     this.tenderSubs.forEach((cb) => cb(clone(this.tenders)));
   }
 
@@ -343,4 +358,3 @@ class MockChainApi implements ChainApi {
   }
 }
 
-export const chainApi: ChainApi = new MockChainApi();

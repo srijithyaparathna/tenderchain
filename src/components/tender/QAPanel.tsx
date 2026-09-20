@@ -5,7 +5,7 @@ import { RoleGatedButton } from '../common/RoleGatedButton';
 import { formatBlock } from '../../lib/blocks';
 import { useApp } from '../../state/AppContext';
 import { requireBidder, requireOfficer } from '../../lib/permissions';
-import { chainApi } from '../../services/mockChainApi';
+import { chainApi } from '../../services/api';
 
 export function QAPanel({ tender }: { tender: Tender }) {
   const { currentAccount, currentBlock, accounts } = useApp();

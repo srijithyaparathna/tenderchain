@@ -4,7 +4,7 @@ import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
 import { useApp } from '../../state/AppContext';
 import { requireOfficer } from '../../lib/permissions';
-import { chainApi } from '../../services/mockChainApi';
+import { chainApi } from '../../services/api';
 import { computeRankings } from '../../lib/scoring';
 
 export function OfficerActionsPanel({ tender }: { tender: Tender }) {
@@ -16,6 +16,13 @@ export function OfficerActionsPanel({ tender }: { tender: Tender }) {
   if (!currentAccount || currentAccount.role !== 'Officer' || currentAccount.address !== tender.officer) return null;
 
   const baseReason = requireOfficer(currentAccount, tender);
+
+  // The pallet records the concrete end block in the outcome; the portal
+  // derives it the same way the wheel does.
+  const standstillEnd =
+    tender.award?.approvedAtBlock !== undefined
+      ? tender.award.approvedAtBlock + tender.gates.standstillPeriod
+      : null;
 
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
@@ -83,6 +90,23 @@ export function OfficerActionsPanel({ tender }: { tender: Tender }) {
               Propose award
             </RoleGatedButton>
           </div>
+        )}
+
+        {tender.state === 'Standstill' && tender.award && (
+          <RoleGatedButton
+            disabledReason={
+              baseReason ||
+              (tender.challenges.some((c) => c.status === 'Open')
+                ? 'An open challenge suspends execution — resolve it first.'
+                : standstillEnd !== null && currentBlock <= standstillEnd
+                  ? `Standstill runs until block #${standstillEnd.toLocaleString()}.`
+                  : undefined)
+            }
+            disabled={busy}
+            onClick={() => run(() => chainApi.executeAward!(tender.id, `Contract for tender ${tender.id}`))}
+          >
+            Execute award (notarise contract)
+          </RoleGatedButton>
         )}
 
         {!['Contracted', 'Cancelled', 'Standstill', 'Awarded'].includes(tender.state) && (

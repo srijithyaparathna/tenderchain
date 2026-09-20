@@ -4,8 +4,8 @@ import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
 import { useApp } from '../../state/AppContext';
 import { requireEvaluator } from '../../lib/permissions';
-import { chainApi } from '../../services/mockChainApi';
-import { mockHash } from '../../lib/hashing';
+import { chainApi } from '../../services/api';
+import { contentHash } from '../../lib/hashing';
 import { isOutlierScore } from '../../lib/scoring';
 
 export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
@@ -91,7 +91,7 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
         scores: tender.criteria.map((c) => ({
           criterionId: c.id,
           score: Math.min(c.maxScore, Math.max(0, scores[c.id] ?? 0)),
-          commentHash: mockHash(comments[c.id] ?? ''),
+          commentHash: contentHash(comments[c.id] ?? ''),
         })),
       });
       setBidId('');
