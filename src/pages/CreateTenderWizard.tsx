@@ -8,6 +8,7 @@ import type { BidMode, ChainConstants, Criterion, TenderKind } from '../types';
 import { TENDER_KIND_LABEL } from '../types';
 import { weightSum } from '../lib/gates';
 import { blocksToDuration, formatBlock } from '../lib/blocks';
+import { describeChainError } from '../lib/errors';
 
 const STEPS = ['Basics', 'Criteria & weights', 'Gates', 'Eligibility & bond', 'Review'] as const;
 
@@ -21,8 +22,25 @@ interface GateForm {
 }
 
 /**
- * A whole-lifecycle schedule you can sit through in about 15 minutes at 6s
- * blocks, anchored on `now` (the live head).
+ * How long the default ("auto") test run should take, end to end.
+ *
+ * This is the frontend's call, not the chain's — change this number to make the
+ * default schedule longer or shorter and it takes effect on reload, with no
+ * runtime change and no node rebuild.
+ *
+ * The one part the chain does dictate is the reveal window: `open_tender`
+ * rejects anything leaving less than `MinRevealWindow` blocks still to run, so
+ * a target shorter than that floor is clamped up to it rather than producing a
+ * tender that could never be opened.
+ */
+const TEST_RUN_MINUTES = 15;
+
+/** Publish, ask a question, get a bid in — the phase before opening needs this many blocks. */
+const MIN_SUBMISSION_BLOCKS = 30;
+
+/**
+ * A whole-lifecycle schedule sized to `TEST_RUN_MINUTES`, anchored on `now`
+ * (the live head).
  *
  * Gates are absolute block numbers, so a schedule is only meaningful relative
  * to the block it was computed from — that is why this is re-derived from the
@@ -32,19 +50,24 @@ interface GateForm {
  *
  * `openingEndAt - openingAt` is the one gap that cannot be compressed: the
  * pallet rejects `open_tender` with `RevealWindowTooShort` below
- * `MinRevealWindow` (100 blocks ≈ 10 min on this runtime), so it takes the
- * bulk of the 15 minutes and everything else is squeezed around it.
+ * `MinRevealWindow`, and it measures that from the block the officer actually
+ * clicks Open, not from `openingAt` — hence the `+ 5` blocks of slack.
  */
 function testRunGates(now: number, constants: ChainConstants | null): GateForm {
+  const blockSeconds = constants?.avgBlockTimeSeconds ?? 6;
   const reveal = (constants?.minRevealWindow ?? 100) + 5;
-  const submissionClose = 30; // ~3 min: publish, ask a question, get a bid in
+  const standstill = Math.max(constants?.minStandstillPeriod ?? 0, 10);
+
+  const targetBlocks = Math.round((TEST_RUN_MINUTES * 60) / blockSeconds);
+  const submissionClose = Math.max(MIN_SUBMISSION_BLOCKS, targetBlocks - reveal - standstill);
+
   return {
     publishAt: now + 2,
     questionsCloseAt: now + 12,
     submissionCloseAt: now + submissionClose,
     openingAt: now + submissionClose,
     openingEndAt: now + submissionClose + reveal,
-    standstillPeriod: Math.max(constants?.minStandstillPeriod ?? 0, 10),
+    standstillPeriod: standstill,
   };
 }
 
@@ -128,25 +151,35 @@ export function CreateTenderWizard() {
 
   const removeCriterion = (id: string) => setCriteria(criteria.filter((c) => c.id !== id));
 
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+
   const submit = async () => {
-    await chainApi.createTender({
-      title: title.trim(),
-      summary: summary.trim(),
-      entity: entity.trim(),
-      officer,
-      kind,
-      bidMode,
-      criteria,
-      gates,
-      eligibility: {
-        requiredCredentials: credentials.split(',').map((c) => c.trim()).filter(Boolean),
-        minReputation,
-      },
-      bond: { amount: bondAmount, currency: bondCurrency, forfeitOnWithdrawal },
-      blindQuestions,
-      shortlistFromTenderId: kind === 'RFT' && shortlistFromTenderId ? shortlistFromTenderId : undefined,
-    });
-    navigate('/');
+    setSubmitting(true);
+    setSubmitError(null);
+    try {
+      await chainApi.createTender({
+        title: title.trim(),
+        summary: summary.trim(),
+        entity: entity.trim(),
+        officer,
+        kind,
+        bidMode,
+        criteria,
+        gates,
+        eligibility: {
+          requiredCredentials: credentials.split(',').map((c) => c.trim()).filter(Boolean),
+          minReputation,
+        },
+        bond: { amount: bondAmount, currency: bondCurrency, forfeitOnWithdrawal },
+        blindQuestions,
+        shortlistFromTenderId: kind === 'RFT' && shortlistFromTenderId ? shortlistFromTenderId : undefined,
+      });
+      navigate('/');
+    } catch (err) {
+      setSubmitError(describeChainError(err));
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -222,21 +255,43 @@ export function CreateTenderWizard() {
                   <div className="space-y-2.5">
                     {criteria.map((c) => (
                       <div key={c.id} className="rounded-md border border-slate-100 p-2.5">
-                        <div className="flex items-center gap-2">
-                          <input value={c.name} onChange={(e) => updateCriterion(c.id, { name: e.target.value })} placeholder="Criterion name" className="input flex-1" />
+                        {/* Grid, not flex: the weight field's width has to win over `.input`'s
+                            own `width: 100%`, and fighting that with a `w-20` utility on the
+                            input itself is exactly the losing battle that produced a full-width
+                            weight box and a collapsed name box. A grid track has no such
+                            conflict — each input's `width: 100%` resolves against its track,
+                            and the track widths are the parent's problem, not each child's. */}
+                        <div className="grid grid-cols-[1fr_5rem_auto_auto] items-center gap-2">
+                          <input
+                            value={c.name}
+                            onChange={(e) => updateCriterion(c.id, { name: e.target.value })}
+                            placeholder="Criterion name"
+                            aria-label="Criterion name"
+                            className="input min-w-0"
+                          />
                           <input
                             type="number"
+                            min={0}
+                            max={100}
                             value={c.weight}
                             onChange={(e) => updateCriterion(c.id, { weight: Number(e.target.value) })}
-                            className="input w-20"
+                            aria-label="Weight (percent)"
+                            className="input min-w-0 text-right"
                           />
                           <span className="text-xs text-slate-400">%</span>
-                          <button onClick={() => removeCriterion(c.id)} className="text-slate-400 hover:text-red-500">✕</button>
+                          <button
+                            onClick={() => removeCriterion(c.id)}
+                            aria-label="Remove criterion"
+                            className="text-slate-400 hover:text-red-500"
+                          >
+                            ✕
+                          </button>
                         </div>
                         <input
                           value={c.description}
                           onChange={(e) => updateCriterion(c.id, { description: e.target.value })}
                           placeholder="Description"
+                          aria-label="Criterion description"
                           className="input mt-1.5"
                         />
                       </div>
@@ -277,7 +332,7 @@ export function CreateTenderWizard() {
                   <div className={`rounded-md border border-dashed p-3 ${gatesPinned ? 'border-slate-300' : 'border-emerald-300 bg-emerald-50/40'}`}>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-medium text-slate-700">
-                        {gatesPinned ? 'Gates pinned to the numbers you typed' : '⚡ Auto: ~15-minute test run'}
+                        {gatesPinned ? 'Gates pinned to the numbers you typed' : `⚡ Auto: ~${TEST_RUN_MINUTES}-minute test run`}
                       </span>
                       {gatesPinned && (
                         <button
@@ -285,7 +340,7 @@ export function CreateTenderWizard() {
                           onClick={() => setPinnedGates(null)}
                           className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                         >
-                          ↺ Back to the 15-minute test gates
+                          ↺ Back to the {TEST_RUN_MINUTES}-minute test gates
                         </button>
                       )}
                     </div>
@@ -304,7 +359,7 @@ export function CreateTenderWizard() {
                       )}{' '}
                       The reveal window still has to clear MinRevealWindow ({constants?.minRevealWindow ?? 100} blocks ≈{' '}
                       {blocksToDuration(constants?.minRevealWindow ?? 100, constants?.avgBlockTimeSeconds ?? 6)}), which
-                      is the one gap that cannot be compressed — it is most of the 15 minutes.
+                      is the one gap that cannot be compressed — it is most of the {TEST_RUN_MINUTES} minutes.
                     </p>
                     <p className="mt-1.5 text-xs font-medium text-slate-600">
                       Full run, create → Contracted: {runLength(gates, currentBlock).toLocaleString()} blocks ≈{' '}
@@ -377,6 +432,11 @@ export function CreateTenderWizard() {
                   <p className="rounded-md bg-slate-50 p-3 text-xs text-slate-500">
                     The tender will be created in <strong>Draft</strong> state. Publish it from the tender detail page when ready — publication is a separate on-chain action so you can review first.
                   </p>
+                  {submitError && (
+                    <p className="rounded-md bg-red-50 p-3 text-xs text-red-700">
+                      Failed to create tender: {submitError}
+                    </p>
+                  )}
                 </div>
               )}
             </CardBody>
@@ -399,8 +459,12 @@ export function CreateTenderWizard() {
                 Next
               </button>
             ) : (
-              <button onClick={submit} className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700">
-                Create draft tender
+              <button
+                onClick={submit}
+                disabled={submitting}
+                className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
+              >
+                {submitting ? 'Creating…' : 'Create draft tender'}
               </button>
             )}
           </div>

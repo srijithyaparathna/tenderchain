@@ -1,6 +1,10 @@
 // The real implementation of `ChainApi`, backed by `api.query.tenderChain.*`
 // for reads and `api.tx.tenderChain.*` for writes.
 //
+// Every id the pallet uses — tender, question, challenge, panel, criterion and
+// price line — is a 32-byte hash, carried here as its 0x-prefixed hex string.
+// Nothing in this file may treat an id as a number.
+//
 // The pallet stores hashes, not content, so every human-readable string in the
 // view model is resolved through `contentStore` and falls back to a short hash
 // when this browser has never seen the text. See
@@ -36,10 +40,23 @@ import {
   ZERO_HASH,
 } from './chainCodec';
 import { getJson, hashOf, putJson, putText, shortHash, textOr } from './contentStore';
-import { asHash32 } from '../lib/hashing';
+import { asHash32, contentHash } from '../lib/hashing';
+import { u8aToString } from '@polkadot/util';
 
 const NOTICE = 'tenderchain.notice';
 const PROPOSALS = 'tenderchain.proposals.v1';
+
+/** `BoundedVec<u8, _>` arrives as `Bytes`; the chain holds UTF-8. */
+function bytesToText(v: unknown): string {
+  const b = v as { toU8a?: () => Uint8Array; toUtf8?: () => string };
+  try {
+    if (typeof b?.toUtf8 === 'function') return b.toUtf8();
+    if (typeof b?.toU8a === 'function') return u8aToString(b.toU8a());
+  } catch {
+    /* fall through to the empty string; callers supply their own fallback */
+  }
+  return '';
+}
 
 interface NoticeContent {
   title: string;
@@ -50,6 +67,12 @@ interface NoticeContent {
 interface AwardProposal {
   bidId: string;
   rationale: string;
+  /**
+   * The chain has no storage for an unapproved proposal, so the block it was
+   * made at has to be remembered here too — otherwise the outcome panel has no
+   * "Proposed at" to show until governance dispatches the award.
+   */
+  proposedAtBlock: number;
 }
 
 function readProposals(): Record<string, AwardProposal> {
@@ -67,6 +90,11 @@ function writeProposal(tenderId: string, proposal: AwardProposal) {
 }
 
 const num = (v: unknown): number => Number(v?.toString() ?? 0);
+/** A `[u8; 32]` id as 0x-prefixed hex, the form every call takes it back in. */
+const hexId = (v: unknown): string => {
+  const h = v as { toHex?: () => string; toString(): string };
+  return typeof h?.toHex === 'function' ? h.toHex() : String(h);
+};
 const bidIdOf = (tenderId: string, bidder: string) => `${tenderId}:${bidder}`;
 const bidderOf = (bidId: string) => bidId.split(':')[1] ?? '';
 
@@ -101,10 +129,29 @@ export class LiveChainApi implements ChainApi {
   private blockSubs = new Set<(b: number) => void>();
   private tenderSubs = new Set<(t: Tender[]) => void>();
   private accountSubs = new Set<(a: AccountRef[]) => void>();
+  private errorSubs = new Set<(e: string | null) => void>();
+  private chainError: string | null = null;
   private ready: Promise<void>;
 
   constructor() {
     this.ready = this.init();
+  }
+
+  private setChainError(message: string | null) {
+    this.chainError = message;
+    this.errorSubs.forEach((cb) => cb(message));
+  }
+
+  getChainError(): string | null {
+    return this.chainError;
+  }
+
+  subscribeChainError(cb: (e: string | null) => void): () => void {
+    this.errorSubs.add(cb);
+    cb(this.chainError);
+    return () => {
+      this.errorSubs.delete(cb);
+    };
   }
 
   private async init(): Promise<void> {
@@ -116,8 +163,11 @@ export class LiveChainApi implements ChainApi {
     this.accountSource = source;
     this.accountSubs.forEach((cb) => cb(accounts));
 
-    this.constants = readConstants(api);
-
+    // Head subscriptions are established before anything that touches the
+    // pallet. Block height does not depend on `tenderChain` existing, so a node
+    // running the wrong runtime must still tick — previously a throw here left
+    // the portal frozen at #0 with no clue why, because the subscriptions below
+    // were never reached and `ready` rejected for every other call too.
     await api.rpc.chain.subscribeFinalizedHeads((head) => {
       this.finalized = head.number.toNumber();
     });
@@ -128,8 +178,21 @@ export class LiveChainApi implements ChainApi {
     await api.rpc.chain.subscribeNewHeads(async (head) => {
       this.block = head.number.toNumber();
       this.blockSubs.forEach((cb) => cb(this.block));
-      await this.refresh();
+      if (this.constants) await this.refresh();
     });
+
+    // A node whose runtime has no TenderChain pallet is a misconfiguration to
+    // report, not a transient fault to retry: record it and let the header say
+    // so, rather than rejecting `ready` and taking every unrelated call with it.
+    try {
+      this.constants = readConstants(api);
+    } catch (e) {
+      this.setChainError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+
+    this.setChainError(null);
+    await this.refresh();
   }
 
   private mustApi(): ApiPromise {
@@ -145,8 +208,12 @@ export class LiveChainApi implements ChainApi {
     try {
       this.tenders = await this.readAllTenders();
       this.tenderSubs.forEach((cb) => cb(this.tenders));
-    } catch {
-      /* a transient read failure should not tear down the subscription */
+    } catch (e) {
+      // A transient read failure should not tear down the subscription, but it
+      // must not vanish either: a swallowed decode error here looks exactly
+      // like an action that did nothing, since the write succeeded and the
+      // re-read that would have shown it silently kept the old state.
+      console.error('[tenderchain] failed to re-read tenders', e);
     }
   }
 
@@ -159,17 +226,21 @@ export class LiveChainApi implements ChainApi {
 
     return Promise.all(
       entries.map(async ([key, value]) => {
-        const id = String(num(key.args[0]));
+        const id = hexId(key.args[0]);
         const rec = (value as unknown as { unwrap(): Record<string, never> }).unwrap();
         return this.mapTender(id, rec);
       }),
-    ).then((list) => list.sort((a, b) => Number(a.id) - Number(b.id)));
+      // Hashed ids carry no order, so creation block (then id, for a stable
+      // tie-break) decides it.
+    ).then((list) =>
+      list.sort((a, b) => a.createdAtBlock - b.createdAtBlock || a.id.localeCompare(b.id)),
+    );
   }
 
   private async mapTender(id: string, rec: Record<string, never>): Promise<Tender> {
     const api = this.mustApi();
     const q = api.query.tenderChain;
-    const tid = Number(id);
+    const tid = id;
 
     const [questions, commitments, reveals, evaluators, scoreSheets, outcome, challengeRows, shortlist, source] =
       await Promise.all([
@@ -191,6 +262,8 @@ export class LiveChainApi implements ChainApi {
       officer: { toString(): string };
       kind: { toString(): string };
       bidMode: { toString(): string };
+      title: unknown;
+      summary: unknown;
       noticeHash: { toString(): string };
       criteriaHash: { toString(): string };
       weights: { criterionId: unknown; weightPercent: unknown }[];
@@ -200,6 +273,7 @@ export class LiveChainApi implements ChainApi {
       bond: { amount: unknown; forfeitOnWithdrawal: { isTrue?: boolean; toString(): string } };
       blindQuestions: { toString(): string };
       state: { toString(): string };
+      createdAt: unknown;
       publishedAt: { isSome: boolean; unwrap(): unknown };
     };
     void r;
@@ -207,14 +281,19 @@ export class LiveChainApi implements ChainApi {
 
     const noticeHash = raw.noticeHash.toString();
     const criteriaHash = raw.criteriaHash.toString();
+    // Title and summary now come from chain state, so they render identically in
+    // every browser. `notice` remains the fallback for tenders created before
+    // the pallet carried them.
+    const chainTitle = bytesToText(raw.title);
+    const chainSummary = bytesToText(raw.summary);
     const notice = getJson<NoticeContent>(noticeHash);
     const maxScore = this.constants?.maxScore ?? 100;
 
     const criteria: Criterion[] =
       getJson<Criterion[]>(criteriaHash) ??
       raw.weights.map((w) => ({
-        id: String(num(w.criterionId)),
-        name: `Criterion ${num(w.criterionId)}`,
+        id: hexId(w.criterionId),
+        name: `Criterion ${shortHash(hexId(w.criterionId))}`,
         description: `Locked under ${shortHash(criteriaHash)}`,
         weight: num(w.weightPercent),
         maxScore,
@@ -234,7 +313,7 @@ export class LiveChainApi implements ChainApi {
       const qHash = rec2.questionHash.toString();
       const answerHash = rec2.answerHash.isSome ? rec2.answerHash.unwrap().toString() : undefined;
       return {
-        id: String(num(key.args[1])),
+        id: hexId(key.args[1]),
         askedBy: rec2.author.isOpen
           ? rec2.author.asOpen.toString()
           : `blinded:${shortHash(rec2.author.asBlinded.toString())}`,
@@ -272,8 +351,8 @@ export class LiveChainApi implements ChainApi {
         valid: { isTrue: boolean; toString(): string };
       };
       const lines = rec2.priceSchedule.map((line) => ({
-        id: String(num(line.itemId)),
-        description: `Item ${num(line.itemId)}`,
+        id: hexId(line.itemId),
+        description: `Item ${shortHash(hexId(line.itemId))}`,
         qty: 1,
         unitPrice: num(line.amount),
       }));
@@ -326,7 +405,7 @@ export class LiveChainApi implements ChainApi {
         evaluator,
         bidId: bidIdOf(id, bidder),
         scores: rec2.scores.map((s) => ({
-          criterionId: String(num(s.criterionId)),
+          criterionId: hexId(s.criterionId),
           score: num(s.score),
           commentHash,
         })),
@@ -335,25 +414,29 @@ export class LiveChainApi implements ChainApi {
     });
 
     const challenges: Challenge[] = challengeRows.map(([key, value]) => {
+      // Grounds and resolution are readable `BoundedVec<u8>` on chain, so unlike
+      // every other text in this file they need no `contentStore` lookup and
+      // render identically in a browser that has never seen the tender.
       const rec2 = (value as unknown as { unwrap(): Record<string, never> }).unwrap() as unknown as {
         challenger: { toString(): string };
-        groundsHash: { toString(): string };
+        grounds: unknown;
+        evidenceHash: { isSome: boolean; unwrap(): { toString(): string } };
         lodgedAt: unknown;
         state: { toString(): string };
-        resolutionHash: { isSome: boolean; unwrap(): { toString(): string } };
+        resolution: { isSome: boolean; unwrap(): unknown };
         resolvedAt: { isSome: boolean; unwrap(): unknown };
       };
-      const grounds = rec2.groundsHash.toString();
-      const resolution = rec2.resolutionHash.isSome ? rec2.resolutionHash.unwrap().toString() : undefined;
       const state = rec2.state.toString();
       return {
-        id: String(num(key.args[1])),
+        id: hexId(key.args[1]),
         lodgedBy: rec2.challenger.toString(),
         lodgedAtBlock: num(rec2.lodgedAt),
-        grounds: textOr(grounds, `Grounds ${shortHash(grounds)}`),
+        grounds: bytesToText(rec2.grounds),
         status: state === 'Upheld' ? 'Upheld' : state === 'Dismissed' ? 'Dismissed' : 'Open',
         resolvedAtBlock: rec2.resolvedAt.isSome ? num(rec2.resolvedAt.unwrap()) : undefined,
-        resolutionRationale: resolution ? textOr(resolution, `Resolution ${shortHash(resolution)}`) : undefined,
+        resolutionRationale: rec2.resolution.isSome
+          ? bytesToText(rec2.resolution.unwrap())
+          : undefined,
       };
     });
 
@@ -376,6 +459,23 @@ export class LiveChainApi implements ChainApi {
         approvedByGovernance: true,
         approvedAtBlock: num(o.awardedAt),
       };
+    } else {
+      // No `Outcomes` entry yet, so governance has not dispatched `award`.
+      // A locally recorded proposal still has to reach the UI: the officer's
+      // propose form hides itself once `award` is set and `AwardOutcomePanel`
+      // renders only when it is, so without this the approve button can never
+      // appear and the proposal is a dead end.
+      const proposal = readProposals()[id];
+      if (proposal) {
+        award = {
+          awardedBidId: proposal.bidId,
+          awardedBidder: bidderOf(proposal.bidId),
+          rationale: proposal.rationale,
+          proposedBy: officer,
+          proposedAtBlock: proposal.proposedAtBlock ?? 0,
+          approvedByGovernance: false,
+        };
+      }
     }
 
     const publishedAt = raw.publishedAt.isSome ? num(raw.publishedAt.unwrap()) : 0;
@@ -385,8 +485,11 @@ export class LiveChainApi implements ChainApi {
     return {
       id,
       noticeHash,
-      title: notice?.title ?? `Tender #${id}`,
-      summary: notice?.summary ?? `Notice anchored at ${shortHash(noticeHash)} — content not held in this browser.`,
+      title: chainTitle || notice?.title || `Tender ${shortHash(id)}`,
+      summary:
+        chainSummary ||
+        notice?.summary ||
+        `Notice anchored at ${shortHash(noticeHash)} — content not held in this browser.`,
       entity: notice?.entity ?? this.nameFor(entityAddress),
       officer,
       kind: kindFromChain(raw.kind.toString()),
@@ -413,7 +516,7 @@ export class LiveChainApi implements ChainApi {
       documents: [],
       qa,
       blindQuestions: raw.blindQuestions.toString() === 'true',
-      shortlistFromTenderId: sourceOpt.isSome ? String(num(sourceOpt.unwrap())) : undefined,
+      shortlistFromTenderId: sourceOpt.isSome ? hexId(sourceOpt.unwrap()) : undefined,
       shortlistedBidders: shortlist.length > 0 ? shortlist.map(([k]) => k.args[1].toString()) : undefined,
       evaluators: evaluatorList,
       conflictDeclarations,
@@ -422,13 +525,13 @@ export class LiveChainApi implements ChainApi {
       scores,
       award,
       challenges,
-      createdAtBlock: publishedAt || num(gates.publishAt),
+      createdAtBlock: num(raw.createdAt) || publishedAt,
     };
   }
 
   async getConstants(): Promise<ChainConstants> {
     await this.ready;
-    if (!this.constants) throw new ChainCallError('Chain constants unavailable');
+    if (!this.constants) throw new ChainCallError(this.chainError ?? 'Chain constants unavailable');
     return this.constants;
   }
 
@@ -505,14 +608,21 @@ export class LiveChainApi implements ChainApi {
       entity: input.entity,
     } satisfies NoticeContent);
 
-    // `criterion_id` is a u32 on chain, but the wizard numbers criteria 'c1',
-    // 'c2'… Renumber to the index so the stored criteria and the on-chain
-    // weights agree — scores are submitted against these ids.
-    const criteria = input.criteria.map((c, i) => ({ ...c, id: String(i) }));
+    // A criterion's id is the hash of its own definition, so the id in the
+    // on-chain weights points unambiguously at one entry in the criteria
+    // document `criteria_hash` commits to. The position is hashed in too:
+    // two identically worded criteria must still get distinct ids, or the
+    // pallet rejects the set as `DuplicateCriterion`.
+    const criteria = input.criteria.map((c, i) => ({
+      ...c,
+      id: contentHash(
+        JSON.stringify({ index: i, name: c.name, description: c.description, weight: c.weight }),
+      ),
+    }));
     const criteriaHash = putJson(criteria);
 
     const weights = criteria.map((c) => ({
-      criterionId: Number(c.id),
+      criterionId: c.id,
       weightPercent: c.weight,
     }));
 
@@ -520,6 +630,8 @@ export class LiveChainApi implements ChainApi {
       input.officer, // entity — the portal treats the officer's account as the entity
       kindToChain(input.kind),
       input.bidMode,
+      input.title,
+      input.summary,
       noticeHash,
       criteriaHash,
       weights,
@@ -539,13 +651,13 @@ export class LiveChainApi implements ChainApi {
         forfeitOnWithdrawal: input.bond.forfeitOnWithdrawal,
       },
       input.blindQuestions,
-      input.shortlistFromTenderId ? Number(input.shortlistFromTenderId) : null,
+      input.shortlistFromTenderId ?? null,
     );
 
     const events = await this.send(tx, input.officer);
     const created = findEvent(events, 'tenderChain', 'TenderCreated');
     if (!created) throw new ChainCallError('No TenderCreated event was emitted.');
-    const id = String(num(created.data[0]));
+    const id = hexId(created.data[0]);
 
     const tender = await this.getTender(id);
     if (!tender) throw new ChainCallError(`Tender ${id} was created but could not be read back.`);
@@ -554,18 +666,29 @@ export class LiveChainApi implements ChainApi {
 
   async publishTender(id: string): Promise<void> {
     const t = await this.requireTender(id);
-    await this.send(this.mustApi().tx.tenderChain.publishTender(Number(id)), t.officer);
+    await this.send(this.mustApi().tx.tenderChain.publishTender(id), t.officer);
   }
 
+  /**
+   * Cancellation is the procuring entity's call, not the officer's (spec §4.1),
+   * so it is signed by the entity account stored on the tender. The portal
+   * creates tenders with the officer as entity, so for those the two coincide.
+   */
   async cancelTender(id: string, reason: string): Promise<void> {
-    const t = await this.requireTender(id);
-    await this.send(this.mustApi().tx.tenderChain.cancelTender(Number(id), putText(reason)), t.officer);
+    await this.ready;
+    const api = this.mustApi();
+    const rec = (await api.query.tenderChain.tenders(id)) as unknown as {
+      isSome: boolean;
+      unwrap(): { entity: { toString(): string } };
+    };
+    if (!rec.isSome) throw new ChainCallError(`Tender ${id} not found on chain.`);
+    await this.send(api.tx.tenderChain.cancelTender(id, putText(reason)), rec.unwrap().entity.toString());
   }
 
   async askQuestion(id: string, asker: string, question: string, blind: boolean): Promise<void> {
     const salt = blind ? randomSalt32() : ZERO_HASH;
     await this.send(
-      this.mustApi().tx.tenderChain.askQuestion(Number(id), putText(question), salt),
+      this.mustApi().tx.tenderChain.askQuestion(id, putText(question), salt),
       asker,
     );
   }
@@ -573,7 +696,7 @@ export class LiveChainApi implements ChainApi {
   async answerQuestion(id: string, qaId: string, answer: string): Promise<void> {
     const t = await this.requireTender(id);
     await this.send(
-      this.mustApi().tx.tenderChain.answerQuestion(Number(id), Number(qaId), putText(answer)),
+      this.mustApi().tx.tenderChain.answerQuestion(id, qaId, putText(answer)),
       t.officer,
     );
   }
@@ -581,7 +704,7 @@ export class LiveChainApi implements ChainApi {
   async appointEvaluator(id: string, evaluator: string): Promise<void> {
     const t = await this.requireTender(id);
     await this.send(
-      this.mustApi().tx.tenderChain.appointEvaluator(Number(id), evaluator, hashOf(`credential:${evaluator}`)),
+      this.mustApi().tx.tenderChain.appointEvaluator(id, evaluator, hashOf(`credential:${evaluator}`)),
       t.officer,
     );
   }
@@ -589,31 +712,31 @@ export class LiveChainApi implements ChainApi {
   async declareConflict(id: string, evaluator: string, hasConflict: boolean, notes?: string): Promise<void> {
     const text = notes?.trim() || (hasConflict ? 'Conflict declared' : 'No conflict declared');
     await this.send(
-      this.mustApi().tx.tenderChain.declareConflict(Number(id), putText(text)),
+      this.mustApi().tx.tenderChain.declareConflict(id, putText(text)),
       evaluator,
     );
     // Appointment and activation are both the officer's calls; the portal
     // activates straight after the declaration so scoring rights go live.
     const t = await this.requireTender(id);
-    await this.send(this.mustApi().tx.tenderChain.activateEvaluator(Number(id), evaluator), t.officer);
+    await this.send(this.mustApi().tx.tenderChain.activateEvaluator(id, evaluator), t.officer);
   }
 
   async openTender(id: string): Promise<void> {
     const t = await this.requireTender(id);
-    await this.send(this.mustApi().tx.tenderChain.openTender(Number(id)), t.officer);
+    await this.send(this.mustApi().tx.tenderChain.openTender(id), t.officer);
   }
 
   async publishShortlist(id: string, bidderAddresses: string[]): Promise<void> {
     const t = await this.requireTender(id);
-    await this.send(this.mustApi().tx.tenderChain.publishShortlist(Number(id), bidderAddresses), t.officer);
+    await this.send(this.mustApi().tx.tenderChain.publishShortlist(id, bidderAddresses), t.officer);
   }
 
   async commitBid(id: string, bidder: string, commitmentHash: string): Promise<void> {
-    await this.send(this.mustApi().tx.tenderChain.commitBid(Number(id), commitmentHash), bidder);
+    await this.send(this.mustApi().tx.tenderChain.commitBid(id, commitmentHash), bidder);
   }
 
   async withdrawCommitment(id: string, bidder: string): Promise<void> {
-    await this.send(this.mustApi().tx.tenderChain.withdrawCommitment(Number(id)), bidder);
+    await this.send(this.mustApi().tx.tenderChain.withdrawCommitment(id), bidder);
   }
 
   async submitOpenBid(
@@ -624,7 +747,7 @@ export class LiveChainApi implements ChainApi {
     const lines = toChainPriceLines(payload.priceLineItems);
     const documentsHash = asHash32(payload.documentsHash, `documents:${id}:${bidder}`);
     await this.send(
-      this.mustApi().tx.tenderChain.submitOpenBid(Number(id), documentsHash, lines),
+      this.mustApi().tx.tenderChain.submitOpenBid(id, documentsHash, lines),
       bidder,
     );
   }
@@ -638,7 +761,7 @@ export class LiveChainApi implements ChainApi {
     const lines = toChainPriceLines(payload.priceLineItems);
     const documentsHash = asHash32(payload.documentsHash, `documents:${id}:${bidder}`);
     const events = await this.send(
-      this.mustApi().tx.tenderChain.revealBid(Number(id), documentsHash, lines, salt),
+      this.mustApi().tx.tenderChain.revealBid(id, documentsHash, lines, salt),
       bidder,
     );
     // reveal_bid returns Ok on a hash mismatch; the failure is only an event.
@@ -668,7 +791,7 @@ export class LiveChainApi implements ChainApi {
   async submitScores(input: SubmitScoreInput): Promise<void> {
     const bidder = bidderOf(input.bidId);
     const scores = input.scores.map((s) => ({
-      criterionId: Number(s.criterionId),
+      criterionId: s.criterionId,
       score: s.score,
     }));
     const commentHash = asHash32(
@@ -676,7 +799,7 @@ export class LiveChainApi implements ChainApi {
       `scores:${input.evaluator}:${input.bidId}`,
     );
     await this.send(
-      this.mustApi().tx.tenderChain.submitScores(Number(input.tenderId), bidder, scores, commentHash),
+      this.mustApi().tx.tenderChain.submitScores(input.tenderId, bidder, scores, commentHash),
       input.evaluator,
     );
   }
@@ -687,8 +810,10 @@ export class LiveChainApi implements ChainApi {
    * governance approves it.
    */
   async proposeAward(id: string, bidId: string, rationale: string): Promise<void> {
+    await this.ready;
     putText(rationale);
-    writeProposal(id, { bidId, rationale });
+    const proposedAtBlock = num(await this.mustApi().query.system.number());
+    writeProposal(id, { bidId, rationale, proposedAtBlock });
     await this.refresh();
   }
 
@@ -700,12 +825,17 @@ export class LiveChainApi implements ChainApi {
     const awardee = bidderOf(proposal.bidId);
     const api = this.mustApi();
     await this.sendSudo(
-      api.tx.tenderChain.award(Number(id), [awardee], hashOf(proposal.rationale)),
+      api.tx.tenderChain.award(id, [awardee], hashOf(proposal.rationale)),
     );
   }
 
   async lodgeChallenge(id: string, lodgedBy: string, grounds: string): Promise<void> {
-    await this.send(this.mustApi().tx.tenderChain.lodgeChallenge(Number(id), putText(grounds)), lodgedBy);
+    // The text itself goes on chain; `evidence_hash` stays null until the portal
+    // offers a document upload to anchor.
+    await this.send(
+      this.mustApi().tx.tenderChain.lodgeChallenge(id, grounds, null),
+      lodgedBy,
+    );
   }
 
   async resolveChallenge(
@@ -717,10 +847,10 @@ export class LiveChainApi implements ChainApi {
     const api = this.mustApi();
     await this.sendSudo(
       api.tx.tenderChain.resolveChallenge(
-        Number(id),
-        Number(challengeId),
+        id,
+        challengeId,
         status === 'Upheld',
-        putText(rationale),
+        rationale,
       ),
     );
   }
@@ -729,7 +859,7 @@ export class LiveChainApi implements ChainApi {
   async executeAward(id: string, contractText = 'Contract executed'): Promise<void> {
     const t = await this.requireTender(id);
     await this.send(
-      this.mustApi().tx.tenderChain.executeAward(Number(id), putText(contractText)),
+      this.mustApi().tx.tenderChain.executeAward(id, putText(contractText)),
       t.officer,
     );
   }

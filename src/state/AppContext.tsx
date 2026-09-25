@@ -16,6 +16,8 @@ interface AppContextValue {
   endpoint: string;
   /** Whether accounts came from a signing extension or the dev keyring. */
   accountSource: 'extension' | 'dev' | null;
+  /** Connected, but the node is unusable for this portal — null when fine. */
+  chainError: string | null;
 }
 
 const AppContext = createContext<AppContextValue | undefined>(undefined);
@@ -30,6 +32,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const [finalizedBlock, setFinalizedBlock] = useState(chainApi.getFinalizedBlock());
+  const [chainError, setChainError] = useState<string | null>(null);
 
   useEffect(
     () =>
@@ -57,6 +60,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return subscribeStatus(setConnection);
   }, []);
 
+  useEffect(() => chainApi.subscribeChainError?.(setChainError), []);
+
   useEffect(() => {
     let alive = true;
     chainApi
@@ -78,6 +83,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     connection,
     endpoint: CHAIN_MODE === 'mock' ? 'simulated' : resolveEndpoint(),
     accountSource: chainApi.getAccountSource?.() ?? null,
+    chainError,
   };
 
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;

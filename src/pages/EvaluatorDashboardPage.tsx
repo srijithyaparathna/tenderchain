@@ -1,3 +1,4 @@
+import { shortHash } from '../services/contentStore';
 import { Link } from 'react-router-dom';
 import { useTenders } from '../hooks/useTenders';
 import { useApp } from '../state/AppContext';
@@ -35,7 +36,7 @@ export function EvaluatorDashboardPage() {
               <Card key={t.id}>
                 <CardHeader
                   title={<Link to={`/tenders/${t.id}`} className="hover:text-blue-600">{t.title}</Link>}
-                  subtitle={`${t.entity} · ${t.id}`}
+                  subtitle={`${t.entity} · ${shortHash(t.id)}`}
                   right={<StatusBadge state={t.state} />}
                 />
                 <CardBody className="flex flex-wrap items-center gap-4 text-sm">

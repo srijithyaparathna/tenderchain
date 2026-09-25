@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { Tender } from '../../types';
 import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
+import { ActionError } from '../common/ActionError';
+import { useChainAction } from '../../hooks/useChainAction';
 import { useApp } from '../../state/AppContext';
 import { requireBidder, requireOfficer } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
@@ -18,7 +20,7 @@ export function ChallengeLogPanel({ tender }: { tender: Tender }) {
   const [grounds, setGrounds] = useState('');
   const [resolving, setResolving] = useState<string | null>(null);
   const [rationale, setRationale] = useState('');
-  const [busy, setBusy] = useState(false);
+  const { busy, error, clearError, run } = useChainAction();
 
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
@@ -26,27 +28,21 @@ export function ChallengeLogPanel({ tender }: { tender: Tender }) {
     requireBidder(currentAccount) ||
     (tender.state !== 'Standstill' ? 'Challenges can only be lodged during the standstill window.' : undefined);
 
-  const lodge = async () => {
+  const lodge = () => {
     if (!currentAccount || !grounds.trim()) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.lodgeChallenge(tender.id, currentAccount.address, grounds.trim());
       setGrounds('');
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const resolve = async (challengeId: string, status: 'Upheld' | 'Dismissed') => {
+  const resolve = (challengeId: string, status: 'Upheld' | 'Dismissed') => {
     if (!rationale.trim()) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.resolveChallenge(tender.id, challengeId, status, rationale.trim());
       setResolving(null);
       setRationale('');
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -89,6 +85,7 @@ export function ChallengeLogPanel({ tender }: { tender: Tender }) {
                         </button>
                         <button onClick={() => setResolving(null)} className="text-xs text-slate-400 hover:text-slate-600">Cancel</button>
                       </div>
+                      <ActionError error={error} onDismiss={clearError} />
                     </div>
                   ) : (
                     <div className="mt-2">
@@ -115,6 +112,7 @@ export function ChallengeLogPanel({ tender }: { tender: Tender }) {
             <RoleGatedButton variant="danger" disabledReason={lodgeDisabled} disabled={busy} onClick={lodge}>
               Lodge challenge
             </RoleGatedButton>
+            {!resolving && <ActionError error={error} onDismiss={clearError} />}
           </div>
         )}
       </CardBody>

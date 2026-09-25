@@ -4,6 +4,7 @@ import { useApp } from '../../state/AppContext';
 import type { Role } from '../../types';
 import { formatBlock } from '../../lib/blocks';
 import { chainApi } from '../../services/api';
+import { describeChainError } from '../../lib/errors';
 
 const NAV = [
   { to: '/', label: 'Tenders', end: true },
@@ -24,7 +25,7 @@ function roleColor(role: string) {
 const ROLES: Role[] = ['Officer', 'Bidder', 'Evaluator', 'Governance', 'Public'];
 
 export function Header() {
-  const { accounts, currentAccount, setCurrentAccount, currentBlock, finalizedBlock, connection, endpoint, accountSource } = useApp();
+  const { accounts, currentAccount, setCurrentAccount, currentBlock, finalizedBlock, connection, endpoint, accountSource, chainError } = useApp();
 
   const [funding, setFunding] = useState<string | null>(null);
 
@@ -34,17 +35,19 @@ export function Header() {
       const names = await chainApi.fundDevAccounts?.();
       setFunding(names && names.length > 0 ? `Funded ${names.join(', ')}` : 'All accounts already funded');
     } catch (e) {
-      setFunding((e as Error).message);
+      setFunding(describeChainError(e));
     }
     setTimeout(() => setFunding(null), 6000);
   };
 
-  const chain = {
-    mock: { dot: 'bg-emerald-500 animate-pulse', text: formatBlock(currentBlock), hint: 'Simulated chain clock — no node attached.' },
-    connecting: { dot: 'bg-amber-500 animate-pulse', text: 'Connecting…', hint: `Opening a WebSocket to ${endpoint}` },
-    connected: { dot: 'bg-emerald-500 animate-pulse', text: formatBlock(currentBlock), hint: `Best block from ${endpoint} — every tender gate and countdown is computed from this. Finalized: #${finalizedBlock}.` },
-    disconnected: { dot: 'bg-red-500', text: 'Node offline', hint: `No node answering at ${endpoint}. Start the TenderChain node, or run with VITE_CHAIN_MODE=mock.` },
-  }[connection];
+  const chain = chainError
+    ? { dot: 'bg-red-500', text: 'Wrong runtime', hint: `${chainError} (connected to ${endpoint})` }
+    : {
+        mock: { dot: 'bg-emerald-500 animate-pulse', text: formatBlock(currentBlock), hint: 'Simulated chain clock — no node attached.' },
+        connecting: { dot: 'bg-amber-500 animate-pulse', text: 'Connecting…', hint: `Opening a WebSocket to ${endpoint}` },
+        connected: { dot: 'bg-emerald-500 animate-pulse', text: formatBlock(currentBlock), hint: `Best block from ${endpoint} — every tender gate and countdown is computed from this. Finalized: #${finalizedBlock}.` },
+        disconnected: { dot: 'bg-red-500', text: 'Node offline', hint: `No node answering at ${endpoint}. Start the TenderChain node, or run with VITE_CHAIN_MODE=mock.` },
+      }[connection];
 
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
@@ -139,6 +142,13 @@ export function Header() {
           )}
         </div>
       </div>
+
+      {chainError && (
+        <div className="border-t border-red-200 bg-red-50 px-4 py-2 text-center text-xs text-red-800">
+          <span className="font-semibold">Connected, but this node cannot run the portal.</span>{' '}
+          {chainError}
+        </div>
+      )}
     </header>
   );
 }

@@ -24,6 +24,39 @@ body {
   font-family: ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
 
+/* The wizard marks up every field as `.input`, but the class was never defined,
+   so those fields rendered at browser-default size — a collapsed text box next
+   to a sprawling number box. Defined here to match the inline styling the
+   tender panels use, and kept in `components` so a utility on the element
+   (`w-24`, `flex-1`) still overrides it. */
+@layer components {
+  .input {
+    width: 100%;
+    min-width: 0;
+    border-radius: calc(var(--spacing) * 1.5);
+    border: 1px solid var(--color-slate-300);
+    padding: calc(var(--spacing) * 1.5) calc(var(--spacing) * 2.5);
+    font-size: var(--text-sm);
+    line-height: var(--text-sm--line-height);
+    background-color: #fff;
+    color: inherit;
+    outline: none;
+  }
+
+  .input:focus {
+    border-color: var(--color-blue-400);
+  }
+
+  .input::placeholder {
+    color: var(--color-slate-400);
+  }
+
+  .input:disabled {
+    background-color: var(--color-slate-50);
+    color: var(--color-slate-400);
+  }
+}
+
 /* Scrollbar polish */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }

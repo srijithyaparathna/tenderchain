@@ -1,6 +1,14 @@
 import type { AccountRef, ChainConstants, Challenge, Tender } from '../types';
 import { ACCOUNTS, CONSTANTS, SEED_TENDERS, nowBlock, tickBlock } from '../data/seed';
 import type { ChainApi, CreateTenderInput, SubmitScoreInput } from './chainApi';
+import { contentHash } from '../lib/hashing';
+
+/**
+ * Ids in the simulated chain are 32-byte hashes, the same shape the pallet
+ * mints, so nothing downstream can come to rely on a counter.
+ */
+const mintId = (kind: string, ...parts: (string | number)[]) =>
+  contentHash(`${kind}:${parts.join(':')}:${Date.now()}:${Math.random()}`);
 
 // Deep clone so mutations never touch the seed module.
 const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
@@ -98,7 +106,7 @@ export class MockChainApi implements ChainApi {
   }
 
   async createTender(input: CreateTenderInput): Promise<Tender> {
-    const id = `T-${1000 + this.tenders.length + Math.floor(Math.random() * 900)}`;
+    const id = mintId('tender', input.officer, this.tenders.length);
     const t: Tender = {
       id,
       noticeHash:
@@ -198,7 +206,7 @@ export class MockChainApi implements ChainApi {
   async askQuestion(id: string, asker: string, question: string, blind: boolean): Promise<void> {
     this.mutate(id, (t) => {
       t.qa.push({
-        id: `q${t.qa.length + 1}-${Date.now()}`,
+        id: mintId('question', id, t.qa.length),
         askedBy: asker,
         question,
         askedAtBlock: this.getCurrentBlock(),
@@ -282,7 +290,7 @@ export class MockChainApi implements ChainApi {
     this.mutate(id, (t) => {
       if (t.state !== 'Standstill') throw new Error('Challenges can only be lodged during the standstill window');
       t.challenges.push({
-        id: `ch-${t.challenges.length + 1}-${Date.now()}`,
+        id: mintId('challenge', id, t.challenges.length),
         lodgedBy,
         lodgedAtBlock: this.getCurrentBlock(),
         grounds,

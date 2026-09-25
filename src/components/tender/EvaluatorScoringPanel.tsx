@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { Tender } from '../../types';
 import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
+import { ActionError } from '../common/ActionError';
+import { useChainAction } from '../../hooks/useChainAction';
 import { useApp } from '../../state/AppContext';
 import { requireEvaluator } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
@@ -14,7 +16,7 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
   const [bidId, setBidId] = useState('');
   const [scores, setScores] = useState<Record<string, number>>({});
   const [comments, setComments] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
+  const { busy, error, clearError, run } = useChainAction();
 
   if (!currentAccount || currentAccount.role !== 'Evaluator' || !tender.evaluators.includes(currentAccount.address)) return null;
 
@@ -22,14 +24,8 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
   const myDeclaration = tender.conflictDeclarations.find((c) => c.evaluator === currentAccount.address);
   const maxScore = tender.criteria[0]?.maxScore ?? 100;
 
-  const declareConflict = async (conflict: boolean) => {
-    setBusy(true);
-    try {
-      await chainApi.declareConflict(tender.id, currentAccount.address, conflict, notes.trim() || undefined);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const declareConflict = (conflict: boolean) =>
+    run(() => chainApi.declareConflict(tender.id, currentAccount.address, conflict, notes.trim() || undefined));
 
   if (!myDeclaration) {
     return (
@@ -51,6 +47,7 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
               Declare: I have a conflict
             </RoleGatedButton>
           </div>
+          <ActionError error={error} onDismiss={clearError} />
         </CardBody>
       </Card>
     );
@@ -80,10 +77,9 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
     );
   }
 
-  const submit = async () => {
+  const submit = () => {
     if (!bidId) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.submitScores({
         tenderId: tender.id,
         evaluator: currentAccount.address,
@@ -97,9 +93,7 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
       setBidId('');
       setScores({});
       setComments({});
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const already = tender.scores.find((s) => s.evaluator === currentAccount.address && s.bidId === bidId);
@@ -163,6 +157,7 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
               );
             })}
             <RoleGatedButton disabledReason={gateReason} disabled={busy} onClick={submit}>Submit scores</RoleGatedButton>
+            <ActionError error={error} onDismiss={clearError} />
           </div>
         )}
       </CardBody>

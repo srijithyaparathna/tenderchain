@@ -44,6 +44,11 @@ export interface ChainApi {
   subscribeAccounts(cb: (accounts: AccountRef[]) => void): () => void;
   /** Where `listAccounts()` came from, when backed by a real node. */
   getAccountSource?(): 'extension' | 'dev' | null;
+  /**
+   * A misconfiguration that leaves the portal connected but unusable — a node
+   * whose runtime has no TenderChain pallet, say. Null when nothing is wrong.
+   */
+  subscribeChainError?(cb: (error: string | null) => void): () => void;
   listTenders(): Promise<Tender[]>;
   getTender(id: string): Promise<Tender | undefined>;
   subscribeTenders(cb: (tenders: Tender[]) => void): () => void;

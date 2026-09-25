@@ -1,3 +1,4 @@
+import { shortHash } from '../services/contentStore';
 import { Link, useParams } from 'react-router-dom';
 import { useTender } from '../hooks/useTenders';
 import { StatusBadge } from '../components/common/StatusBadge';
@@ -48,7 +49,7 @@ export function TenderDetailPage() {
           </div>
           <h1 className="text-xl font-semibold text-slate-900">{tender.title}</h1>
           <p className="mt-1 max-w-2xl text-sm text-slate-500">{tender.summary}</p>
-          <p className="mt-1.5 text-xs text-slate-400">{tender.entity} · Officer: {officerName} · <span className="mono">{tender.id}</span></p>
+          <p className="mt-1.5 text-xs text-slate-400">{tender.entity} · Officer: {officerName} · <span className="mono" title={tender.id}>{shortHash(tender.id)}</span></p>
         </div>
         <div className="text-right">
           <HashTag hash={tender.noticeHash} explain="Notice hash — the on-chain commitment to this tender's published notice." label="Notice" />

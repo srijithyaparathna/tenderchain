@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { Tender } from '../../types';
 import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
+import { ActionError } from '../common/ActionError';
+import { useChainAction } from '../../hooks/useChainAction';
 import { HashTag } from '../common/HashTag';
 import { useApp } from '../../state/AppContext';
 import { requireBidder } from '../../lib/permissions';
@@ -60,7 +62,7 @@ function LineItemsEditor({ items, setItems }: { items: LineItem[]; setItems: (v:
 
 export function BidActionPanel({ tender }: { tender: Tender }) {
   const { currentAccount } = useApp();
-  const [busy, setBusy] = useState(false);
+  const { busy, error, clearError, run } = useChainAction();
   const [items, setItems] = useState<LineItem[]>([{ id: 'l1', description: '', qty: 1, unitPrice: 0 }]);
   const [docsLabel, setDocsLabel] = useState('');
   const [salt, setSalt] = useState('');
@@ -81,14 +83,13 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
   // ---- OPEN MODE ----
   if (tender.bidMode === 'Open') {
     const disabled = requireBidder(currentAccount) || (tender.state !== 'Submission' ? `Bids can only be submitted during the submission window (currently: ${tender.state}).` : undefined);
-    const submit = async () => {
-      setBusy(true);
-      try {
-        await chainApi.submitOpenBid(tender.id, currentAccount.address, { documentsHash: documentsHash || contentHash(`${tender.id}-${Date.now()}`), priceLineItems: items });
-      } finally {
-        setBusy(false);
-      }
-    };
+    const submit = () =>
+      run(() =>
+        chainApi.submitOpenBid(tender.id, currentAccount.address, {
+          documentsHash: documentsHash || contentHash(`${tender.id}-${Date.now()}`),
+          priceLineItems: items,
+        }),
+      );
     return (
       <Card>
         <CardHeader title="Submit your bid" subtitle="Open bid mode — bid contents are public immediately." />
@@ -102,6 +103,7 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
           <LineItemsEditor items={items} setItems={setItems} />
           <div className="mt-3">
             <RoleGatedButton disabledReason={disabled} disabled={busy} onClick={submit}>{myRevealedBid ? 'Update bid' : 'Submit bid'}</RoleGatedButton>
+            <ActionError error={error} onDismiss={clearError} />
           </div>
         </CardBody>
       </Card>
@@ -130,19 +132,16 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
     }
 
     const source = revealItems ?? local;
-    const reveal = async () => {
+    const reveal = () => {
       if (!source) return;
-      setBusy(true);
-      try {
+      run(async () => {
         await chainApi.revealBid(tender.id, currentAccount.address, {
           documentsHash: source.documentsHash,
           priceLineItems: source.priceLineItems,
           salt: source.salt,
         });
         clearLocalSealedBid(tender.id, currentAccount.address);
-      } finally {
-        setBusy(false);
-      }
+      });
     };
 
     return (
@@ -161,6 +160,7 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
                 <div>Commitment (recomputed): <HashTag hash={buildCommitment(local.documentsHash, local.priceLineItems, local.salt)} explain="Recomputed from the details above — must equal your on-chain commitment hash for the reveal to be accepted." /></div>
               </div>
               <RoleGatedButton disabled={busy} onClick={reveal}>Reveal bid</RoleGatedButton>
+              <ActionError error={error} onDismiss={clearError} />
             </>
           ) : (
             <>
@@ -181,6 +181,7 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
               >
                 Preview reveal
               </RoleGatedButton>
+              <ActionError error={error} onDismiss={clearError} />
             </>
           )}
         </CardBody>
@@ -193,26 +194,19 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
     requireBidder(currentAccount) ||
     (tender.state !== 'Submission' ? `Bids can only be committed during the submission window (currently: ${tender.state}).` : undefined);
 
-  const doCommit = async () => {
+  const doCommit = () => {
     if (!documentsHash || !salt) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.commitBid(tender.id, currentAccount.address, previewCommitment);
       saveLocalSealedBid(tender.id, currentAccount.address, { documentsHash, priceLineItems: items, salt, totalPrice, commitmentHash: previewCommitment });
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const withdraw = async () => {
-    setBusy(true);
-    try {
+  const withdraw = () =>
+    run(async () => {
       await chainApi.withdrawCommitment(tender.id, currentAccount.address);
       clearLocalSealedBid(tender.id, currentAccount.address);
-    } finally {
-      setBusy(false);
-    }
-  };
+    });
 
   return (
     <Card>
@@ -259,6 +253,7 @@ export function BidActionPanel({ tender }: { tender: Tender }) {
             </RoleGatedButton>
           )}
         </div>
+        <ActionError error={error} onDismiss={clearError} />
       </CardBody>
     </Card>
   );

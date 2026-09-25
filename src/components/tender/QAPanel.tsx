@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { Tender } from '../../types';
 import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
+import { ActionError } from '../common/ActionError';
+import { useChainAction } from '../../hooks/useChainAction';
 import { formatBlock } from '../../lib/blocks';
 import { useApp } from '../../state/AppContext';
 import { requireBidder, requireOfficer } from '../../lib/permissions';
@@ -13,7 +15,7 @@ export function QAPanel({ tender }: { tender: Tender }) {
   const [blind, setBlind] = useState(tender.blindQuestions);
   const [answering, setAnswering] = useState<string | null>(null);
   const [answerText, setAnswerText] = useState('');
-  const [busy, setBusy] = useState(false);
+  const { busy, error, clearError, run } = useChainAction();
 
   const askDisabled =
     requireBidder(currentAccount) ||
@@ -22,27 +24,21 @@ export function QAPanel({ tender }: { tender: Tender }) {
 
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
-  const submitQuestion = async () => {
+  const submitQuestion = () => {
     if (!currentAccount || !question.trim()) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.askQuestion(tender.id, currentAccount.address, question.trim(), blind);
       setQuestion('');
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
-  const submitAnswer = async (qaId: string) => {
+  const submitAnswer = (qaId: string) => {
     if (!answerText.trim()) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.answerQuestion(tender.id, qaId, answerText.trim());
       setAnswering(null);
       setAnswerText('');
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   return (
@@ -114,10 +110,11 @@ export function QAPanel({ tender }: { tender: Tender }) {
                 Ask anonymously
               </label>
             )}
-            <RoleGatedButton disabledReason={askDisabled} onClick={submitQuestion}>
+            <RoleGatedButton disabledReason={askDisabled} disabled={busy} onClick={submitQuestion}>
               Submit question
             </RoleGatedButton>
           </div>
+          <ActionError error={error} onDismiss={clearError} />
         </div>
       </CardBody>
     </Card>

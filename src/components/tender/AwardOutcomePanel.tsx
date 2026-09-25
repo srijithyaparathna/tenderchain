@@ -5,23 +5,17 @@ import { useApp } from '../../state/AppContext';
 import { requireGovernance } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
 import { formatBlock } from '../../lib/blocks';
-import { useState } from 'react';
+import { ActionError } from '../common/ActionError';
+import { useChainAction } from '../../hooks/useChainAction';
 
 export function AwardOutcomePanel({ tender }: { tender: Tender }) {
   const { accounts, currentAccount } = useApp();
-  const [busy, setBusy] = useState(false);
+  const { busy, error, clearError, run } = useChainAction();
   if (!tender.award) return null;
 
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
-  const approve = async () => {
-    setBusy(true);
-    try {
-      await chainApi.approveAward(tender.id);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const approve = () => run(() => chainApi.approveAward(tender.id));
 
   return (
     <Card>
@@ -61,6 +55,7 @@ export function AwardOutcomePanel({ tender }: { tender: Tender }) {
             <RoleGatedButton variant="governance" disabledReason={requireGovernance(currentAccount)} disabled={busy} onClick={approve}>
               Approve award (governed call)
             </RoleGatedButton>
+            <ActionError error={error} onDismiss={clearError} />
           </div>
         )}
       </CardBody>

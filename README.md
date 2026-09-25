@@ -508,7 +508,7 @@ sends only the hash. A page renders text by looking the hash back up locally.
 
 Consequence: open the same tender in a different browser and you get correct
 state, correct gates, correct amounts — and *placeholder* text like
-`Tender #3` or `Criterion 0`. **That is the pallet working correctly.** The
+`Tender 0x3f2a…9c1e` or `Criterion 0x81d0…a4b2`. **That is the pallet working correctly.** The
 chain never had the text; it only ever had proof that some specific text
 existed. In production this layer is a DNC/IPFS store; for testing it is
 `localStorage`. The same applies to Q&A, challenge grounds, resolution

@@ -2,6 +2,8 @@ import { useState } from 'react';
 import type { Tender } from '../../types';
 import { Card, CardBody, CardHeader } from '../common/Card';
 import { RoleGatedButton } from '../common/RoleGatedButton';
+import { ActionError } from '../common/ActionError';
+import { useChainAction } from '../../hooks/useChainAction';
 import { useApp } from '../../state/AppContext';
 import { requireOfficer } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
@@ -11,20 +13,17 @@ import { formatBlock } from '../../lib/blocks';
 export function EvaluatorPanel({ tender }: { tender: Tender }) {
   const { accounts, currentAccount, constants } = useApp();
   const [pick, setPick] = useState('');
-  const [busy, setBusy] = useState(false);
+  const { busy, error, clearError, run } = useChainAction();
 
   const evaluatorPool = accounts.filter((a) => a.role === 'Evaluator' && !tender.evaluators.includes(a.address));
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
-  const appoint = async () => {
+  const appoint = () => {
     if (!pick) return;
-    setBusy(true);
-    try {
+    run(async () => {
       await chainApi.appointEvaluator(tender.id, pick);
       setPick('');
-    } finally {
-      setBusy(false);
-    }
+    });
   };
 
   const rankings = computeRankings(tender);
@@ -84,6 +83,7 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
             <RoleGatedButton variant="secondary" disabledReason={requireOfficer(currentAccount, tender) || (!pick ? 'Choose an evaluator first.' : undefined)} disabled={busy} onClick={appoint}>
               Appoint
             </RoleGatedButton>
+            <div className="w-full"><ActionError error={error} onDismiss={clearError} /></div>
           </div>
         )}
 

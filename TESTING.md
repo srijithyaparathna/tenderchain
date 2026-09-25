@@ -73,7 +73,7 @@ thing to understand before testing.** `createTender`'s `notice_hash` is a
 - When a page displays a tender, it looks the hash up in that same local
   store. If it finds the text, you see it. If it doesn't — because you're on
   a different browser, a different machine, or you cleared storage — you see
-  a placeholder like `Tender #3` or `Notice anchored at 0xabc123…def — content
+  a placeholder like `Tender 0x3f2a…9c1e` or `Notice anchored at 0xabc123…def — content
   not held in this browser`, **and that is the pallet working correctly**,
   not a bug. The chain itself never had the text; it only ever had the proof
   that some specific text existed.
@@ -280,6 +280,7 @@ number ticking up every ~6s** means both halves are talking.
 |---|---|
 | Green dot, number climbing | Both up. Go to §3. |
 | **"Node offline"** (red) | The page loaded, so the frontend is fine, but `/ws` did not reach the node. Check Terminal 1 is still running and on `--rpc-port 9955`. |
+| Red dot reading **"Wrong runtime"** + a red banner, but blocks still ticking | `/ws` reached *a* node, but one whose runtime has no `tenderChain` pallet. See the next section. |
 | Page doesn't load at all | The frontend is not being served. Option A: is `npm run dev` still running? Option B: `systemctl is-active nginx`, and did you ever run `npm run deploy`? |
 | Loads, but looks like an older version | Stale Option B deploy — see the trap above. |
 
@@ -287,10 +288,173 @@ No node at all and you just want to look at the UI? `VITE_CHAIN_MODE=mock npm ru
 dev` runs the fully simulated in-browser chain from §1 — but nothing you do there
 touches real storage.
 
-### Shutting down
+### "Wrong runtime" — connected to a node without the pallet
 
-`Ctrl+C` in each terminal. Nothing needs cleaning up: `--dev` state is in memory
-and the deployed files are static.
+The header shows a **red dot reading "Wrong runtime"** and a red banner across
+the top: *"Connected, but this node cannot run the portal."* The block number
+keeps ticking normally behind it. This is not a connection failure — `/ws`
+reached a node whose runtime has no `tenderChain` pallet, so nothing that reads
+pallet state can work.
+
+> **On an older deployed bundle the same fault looks different:** the header
+> freezes at `#0` and the constants panel sits on "Loading constants…" forever,
+> with the real reason only in the browser console. That was
+> `readConstants()` throwing inside `LiveChainApi.init()` before the head
+> subscriptions were set up, which killed them along with every other call.
+> Head subscriptions are now established first and the error is surfaced
+> instead of swallowed. If you still see a silent freeze at `#0`, you are
+> looking at a stale deploy — re-run `npm run deploy`.
+
+On this machine the cause is almost always the proxy pointing at **9944**, the
+unrelated FastLane node, instead of **9955**. Check what a port is really
+serving:
+
+```bash
+cd ~/tenderchain/frontend/tenderchain
+node -e '
+const { ApiPromise, WsProvider } = require("@polkadot/api");
+(async () => {
+  for (const url of ["ws://127.0.0.1:9955", "ws://127.0.0.1:9944"]) {
+    try {
+      const provider = new WsProvider(url, false);   // false = do not retry forever
+      await provider.connect();
+      const api = await ApiPromise.create({ provider, throwOnConnect: true });
+      console.log(url, "tenderChain pallet?", !!api.consts.tenderChain);
+      await api.disconnect();
+    } catch {
+      console.log(url, "unreachable");
+    }
+  }
+  process.exit(0);
+})();'
+```
+
+A TenderChain node prints `true`. The FastLane node prints `false` — its pallet
+list carries `fastlane` where `tenderChain` should be. `unreachable` means
+nothing is listening at all, which is the "Node offline" case above instead.
+
+```
+ws://127.0.0.1:9955 unreachable
+ws://127.0.0.1:9944 tenderChain pallet? false
+```
+
+That pair of lines is the exact failure this section describes: the only node
+running is the wrong one, and the proxy is pointed at it.
+
+**Option B (nginx)** — check and correct the proxy target, then reload:
+
+```bash
+grep proxy_pass /etc/nginx/sites-available/tenderchain
+
+sudo sed -i 's|proxy_pass http://127.0.0.1:9944/;|proxy_pass http://127.0.0.1:9955/;|' \
+  /etc/nginx/sites-available/tenderchain
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+Then hard-reload the tab. **No rebuild or redeploy is needed** — the node's port
+lives only in the proxy config, never in the bundle.
+
+**Option A (vite)** — the same target is `NODE_WS` in `vite.config.ts`, default
+`ws://127.0.0.1:9955`; override it with `TENDERCHAIN_NODE_WS`.
+
+Repointing the proxy only helps if a TenderChain node is actually listening on
+9955 — if the check above printed `unreachable`, start Terminal 1 again first.
+Because that node runs in the foreground, closing its terminal stops it, and the
+symptom flips from frozen-at-`#0` to "Node offline". `nohup`, `tmux` or a systemd
+unit keeps it up across sessions.
+
+### How nginx connects the portal to the chain
+
+Worth understanding before operating it, because the two halves fail
+separately. One nginx server block
+(`/etc/nginx/sites-available/tenderchain`) does two unrelated jobs:
+
+| Location | Serves | If this breaks |
+|---|---|---|
+| `location /` | Static files from `/var/www/tenderchain`, with an SPA fallback to `index.html` | The page doesn't load at all |
+| `location /ws` | `proxy_pass http://127.0.0.1:9955/` — the node's WebSocket, upgraded to a long-lived connection (`proxy_read_timeout 86400`) | The page loads fine but shows "Node offline" or "Wrong runtime" |
+
+So the portal and the chain reach the browser **through the same origin and the
+same port 80** — which is why the node's port never has to be opened in the GCP
+firewall, and why `http://136.113.216.174/` alone is enough.
+
+Three things all have to be true for the site to work:
+
+```bash
+# 1. the site is enabled (a symlink into sites-enabled)
+ls -l /etc/nginx/sites-enabled/tenderchain
+
+# 2. /ws points at a node that has the TenderChain pallet
+grep proxy_pass /etc/nginx/sites-available/tenderchain    # expect 127.0.0.1:9955
+
+# 3. that node is actually running
+curl -s -H "Content-Type: application/json" \
+  -d '{"id":1,"jsonrpc":"2.0","method":"system_chain","params":[]}' \
+  http://127.0.0.1:9955
+```
+
+A quick end-to-end check of all three at once — 200 means the files are served,
+101 means the WebSocket upgrade works:
+
+```bash
+curl -s -o /dev/null -w "page: %{http_code}\n" http://136.113.216.174/
+curl -s -o /dev/null -w "ws:   %{http_code}\n" \
+  -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+  http://136.113.216.174/ws
+```
+
+### Stopping and restarting the deployed site
+
+`Ctrl+C` handles Terminal 1 (the node) and, under Option A, the vite dev server.
+Nothing needs cleaning up after either: `--dev` state is in memory and the
+deployed files are static.
+
+Option B is different — **nginx is a background service, not a terminal**, so
+closing your shell does not stop it. Pick the smallest hammer that does the job:
+
+| Goal | Command | Affects |
+|---|---|---|
+| **Take the portal offline**, leave other sites up | `sudo rm /etc/nginx/sites-enabled/tenderchain`<br>`sudo nginx -t && sudo systemctl reload nginx` | TenderChain only — the IP then 404s |
+| **Put it back** | `sudo ln -s /etc/nginx/sites-available/tenderchain /etc/nginx/sites-enabled/tenderchain`<br>`sudo nginx -t && sudo systemctl reload nginx` | TenderChain only |
+| **Stop nginx entirely** | `sudo systemctl stop nginx` | **Every** site on this box — also `fastlane-api`, `fastlane-frontend`, `substrate` |
+| **Start it again** | `sudo systemctl start nginx` | all of the above |
+| Check what's running | `systemctl is-active nginx` · `ls /etc/nginx/sites-enabled/` | — |
+
+Prefer the first pair. Stopping nginx outright takes unrelated services down
+with it, and there is no reason to do that just to park the portal.
+
+> **`nginx -t` before every reload.** A config typo makes `reload` a no-op on a
+> running server but kills a `restart` outright — test first and you never find
+> that out the hard way.
+
+**Bringing the whole thing back up from cold**, in order — the node first, since
+nginx only proxies to it:
+
+```bash
+# 1. the node (Terminal 1, stays open)
+cd ~/tenderchain/blockchain
+./target/release/solochain-template-node --dev \
+  --rpc-port 9955 --port 30343 --rpc-external --rpc-cors all
+
+# 2. the site (any terminal; only needed if you disabled it)
+sudo ln -s /etc/nginx/sites-available/tenderchain /etc/nginx/sites-enabled/tenderchain
+sudo nginx -t && sudo systemctl reload nginx
+
+# 3. the frontend build — only if src/ changed since the last deploy
+cd ~/tenderchain/frontend/tenderchain
+npm run deploy
+```
+
+Then hard-reload the tab (**Ctrl+Shift+R**) and click **⛽ Fund dev accounts**,
+because step 1 started a brand-new chain.
+
+> **The node is the fragile one.** It runs in the foreground, so closing that
+> terminal kills the chain and wipes every tender with it (`--dev` keeps no
+> state on disk). For a session that outlives your SSH connection, start it
+> under `tmux`/`nohup` — or give it `--base-path ./data/tenderchain --chain
+> local --validator` if you also want the tenders to survive a restart.
 
 ---
 
@@ -331,11 +495,26 @@ and the deployed files are static.
    only need to read the block yourself if you pin your own numbers.
 2. **Leave the Gates step alone for a fast run.** The default schedule is
    publish in 2 blocks, Q&A closes in 12, submission closes and opening starts
-   at 30, the reveal window is `MinRevealWindow + 5` blocks wide (the one gap
-   that can't be compressed), and standstill is 10 — **145 blocks ≈ 14m30s**
+   at 35, the reveal window is `MinRevealWindow + 5` blocks wide (the one gap
+   that can't be compressed), and standstill is 10 — **150 blocks ≈ 15m**
    from creation to *Contracted*. The panel shows that total live. Typing in
    any gate field **pins** the schedule to your numbers and stops it tracking;
    a **↺ Back to the 15-minute test gates** button appears to undo that.
+
+   > **Changing how long a test run takes is a frontend edit, not a chain one.**
+   > The target is `TEST_RUN_MINUTES` at the top of
+   > `src/pages/CreateTenderWizard.tsx`. Change it, `npm run deploy` (or just
+   > reload under `npm run dev`), and the default schedule resizes — no runtime
+   > change, no `cargo build`.
+   >
+   > What you **cannot** shorten from the frontend is the reveal window.
+   > `open_tender` rejects anything leaving less than `MinRevealWindow` blocks
+   > still to run (`RevealWindowTooShort`), measured from the block you actually
+   > click Open — so on this runtime, ~100 blocks ≈ 10 min of the run is a chain
+   > rule. Setting `TEST_RUN_MINUTES` below that floor clamps back up to ~14m30s
+   > rather than generating a tender that can never be opened. Going *below* 10
+   > minutes means editing `MinRevealWindow` in the runtime and rebuilding the
+   > node.
 3. **Check the account dropdown before every click**, not just the form
    fields. It doesn't reset between actions and doesn't warn you before
    signing with the wrong role — you'll only find out after, as a
@@ -344,7 +523,9 @@ and the deployed files are static.
    Appoint and declare-conflict for three separate accounts (Charlie, Dave,
    Eve) — the award will fail with `TooFewEvaluators` after only one or two.
    The Appoint control is only on screen while the tender is in `Draft`,
-   `Published` or `Submission`, so do it right after Publish, not later (§6.1).
+   `Published` or `Submission`, **and** only until three are appointed. The
+   simplest habit is to appoint straight after **Create draft tender**, before
+   publishing — all of it is legal in `Draft` (§6.1).
 5. **A "successful" reveal isn't necessarily a valid one.** `revealBid`
    returns `Ok` even on a hash mismatch — the portal shows this as a
    disqualified bid (`RevealMismatch`) rather than a transaction failure.
@@ -438,17 +619,58 @@ them; everything else stays hidden rather than shown-disabled):
 
 | Panel | Visible to | Buttons → extrinsic |
 |---|---|---|
-| Officer actions | The tender's officer account only | Publish tender → **`publishTender`** · Open tender (start reveal window) → **`openTender`** · Propose award → records locally, no call yet · Execute award (notarise contract) → **`executeAward`** · Cancel tender → **`cancelTender`** |
+| Officer actions | The tender's officer account only | Publish tender → **`publishTender`** · Open tender (start reveal window) → **`openTender`** · Propose award → records locally, no call yet · Publish shortlist *(EOI only)* → **`publishShortlist`** · Execute award (notarise contract) → **`executeAward`** · Cancel tender → **`cancelTender`** |
 | Bid panel | An account with role Bidder | Open mode: Submit/Update bid → **`submitOpenBid`**. Sealed mode: Commit bid → **`commitBid`**, Withdraw commitment → **`withdrawCommitment`**, Reveal bid → **`revealBid`** |
 | Evaluator scoring | An account appointed as evaluator on this tender | Declare: no conflict / I have a conflict → **`declareConflict`** (then auto-**`activateEvaluator`** by the officer, chained by the adapter) · Submit scores → **`submitScores`** |
 | Eligibility & bond | Everyone (read-only) | — |
+
+#### "The guide says click X and there is no X"
+
+Almost always one of three things. Work down the ladder in order:
+
+| What you're looking at | What it means | What to do |
+|---|---|---|
+| **The whole card is missing** | Action cards are hidden outright, not shown disabled, when the header dropdowns don't match. | Fix the two dropdowns — see the table below. |
+| **Card is there, but not that button** | Officer actions renders **exactly one** lifecycle button: the one matching the tender's current state. | Check the stepper at the top and the Gates panel — you're probably waiting on a gate. |
+| **Button is there but grey** | You're allowed the action, but a condition isn't met yet. | Read the small grey line underneath it — it names the exact block it's waiting for. |
+
+**Which card appears when.** All three live in the right-hand column, and each
+disappears completely if its condition fails:
+
+| Card | Appears only when |
+|---|---|
+| **Officer actions** | role lens = `Officer` **and** the selected account is *this tender's own officer* (Alice, for a tender Alice created) |
+| **Bid panel** | role lens = `Bidder` |
+| **Conflict declaration / Scoring** | role lens = `Evaluator` **and** that account is already appointed on this tender |
+
+The **role dropdown is a lens you set yourself** — it is not read from the
+chain. Switching only the account dropdown leaves the lens where it was, and
+that single mistake is the most common reason a card looks missing.
+
+**Which button Officer actions shows, by state** — this is why "Publish tender"
+vanishes after you click it:
+
+| Tender state | Button shown |
+|---|---|
+| `Draft` | **Publish tender** |
+| `Published` / `Submission` | *(no lifecycle button — the chain advances these on its own)* |
+| `Closed` | **Open tender (start reveal window)** |
+| `Evaluation`, no award yet (RFQ/RFT) | ranked results + awardee dropdown + rationale box + **Propose award** |
+| `Evaluation` on an **EOI** | supplier checkboxes + **Publish shortlist** — an EOI ends at `Shortlisted`, never at an award |
+| `Standstill`, award proposed | **Execute award (notarise contract)** |
+| anything except `Contracted`/`Cancelled`/`Standstill`/`Awarded` | **Cancel tender** (red) also shown |
+
+> **"Right-hand column" only holds at desktop width.** The page is a 3-column
+> grid at `lg` and collapses to one column below that, where the action cards
+> stack *underneath* Criteria / Gates / Q&A / Bidders. On a narrow window,
+> scroll down — don't look right.
 
 QA panel's **Submit question** → **`askQuestion`**; the officer's answer
 field (appears inline per-question once you're the officer) → **`answerQuestion`**.
 Challenge panel's **Lodge challenge** (bidder-only, shown during Standstill) →
 **`lodgeChallenge`**.
 
-> **Known gaps — pallet calls with no button.** Four things the pallet can do
+> **Known gaps — pallet calls with no button.** Three things the pallet can do
 > that you cannot reach from this portal. None of them blocks a lifecycle run;
 > drive them from Polkadot.js Apps if you need to exercise them.
 >
@@ -456,8 +678,11 @@ Challenge panel's **Lodge challenge** (bidder-only, shown during Standstill) →
 > |---|---|
 > | `publish_addendum` | No UI and no `ChainApi` method — the word "addendum" does not appear in `src/` at all. |
 > | `call_off` | Same: framework-agreement call-offs are unimplemented in the frontend. |
-> | `publish_shortlist` | `LiveChainApi.publishShortlist()` exists, but **no component calls it**, so there is no button. This is what stops Tender 4 below completing through the portal. |
 > | Documents panel | Always reads empty on a live chain. The pallet has no document-registry storage item — document hashes travel embedded in `notice_hash`/`documents_hash` on other calls, not as a standalone list. The panel is wired for the mock chain's richer `documents[]` array. |
+>
+> `publish_shortlist` **used to be on this list** and no longer is — the Officer
+> actions card now shows a **Publish shortlist** block on an EOI in
+> `Evaluation`, so Tender 4 runs end to end in the portal.
 
 ### Evaluator dashboard (`/evaluator`) — `EvaluatorDashboardPage`
 
@@ -515,7 +740,8 @@ address equals the tender's officer (`OfficerActionsPanel.tsx:16`).
 | **Appoint evaluator** | Evaluator panel (left column) | state ∈ `Draft`/`Published`/`Submission` **and** fewer than `MinEvaluators` appointed | **`appointEvaluator`** |
 | Activate evaluator | *no button* | fires automatically right after the evaluator declares | **`activateEvaluator`** |
 | Open tender | Officer actions | state = `Closed`, current block ≥ `openingAt` | **`openTender`** |
-| Propose award | Officer actions | scores exist | **none** — recorded in this browser only |
+| Propose award | Officer actions | state = `Evaluation`, not an EOI, scores exist | **none** — recorded in this browser only |
+| **Publish shortlist** | Officer actions | kind = `EOI` **and** state = `Evaluation` | **`publishShortlist`** — only accepts bidders whose reveal was valid |
 | Execute award | Officer actions | state = `Standstill`, past the standstill end, no open challenge | **`executeAward`** |
 | Cancel tender | Officer actions | tender not in a terminal state | **`cancelTender`** |
 
@@ -523,9 +749,10 @@ address equals the tender's officer (`OfficerActionsPanel.tsx:16`).
 > the tender is in `Draft`, `Published` or `Submission`
 > (`EvaluatorPanel.tsx:72`) — once submission closes it is gone, and there is no
 > other way to appoint from the portal. The pallet itself has no such state
-> limit, but the UI does, so do it right after **Publish tender**. The control
-> also disappears once three evaluators are on the panel, which is why you
-> cannot appoint a fourth.
+> limit, and none on `declare_conflict` either, so the whole appoint-and-declare
+> round is legal while the tender is still in `Draft`: do it immediately after
+> **Create draft tender**, before you publish. The control also disappears once
+> three evaluators are on the panel, which is why you cannot appoint a fourth.
 
 > **Propose award writes nothing to the chain.** It records your choice in
 > `localStorage` so the Award outcome panel has something to show; the actual
@@ -616,7 +843,7 @@ click **Create draft tender** on the last step.
 | 1 | RFQ, open bids | The fastest path to `Contracted`. Start here. |
 | 2 | RFT, sealed bids | `commitBid` → `revealBid`, blind Q&A, a bond |
 | 3 | Tight gates | `RevealWindowTooShort` / `GateOrderInvalid` validation |
-| 4 | EOI → shortlist → RFT | `shortlistFrom` chaining *(needs Polkadot.js — see below)* |
+| 4 | EOI → shortlist → RFT | `publishShortlist` and `shortlistFrom` chaining |
 | 5 | Challenge | `lodgeChallenge`, dismiss **and** uphold-then-rescore |
 | 6 | **Three competing bidders** | Real ranking, a winner who is not the cheapest, evaluator disagreement |
 | 7 | **Bids that go wrong** | `withdrawCommitment`, `RevealMismatch`, a bidder who never reveals |
@@ -645,6 +872,13 @@ like Alice and Bob, so they need no funding.
 
 The quickest path to a `Contracted` tender: no salt to keep, no sealed
 reveal, bid content is public the moment it's submitted.
+
+It runs in two halves, and keeping them straight avoids the usual confusion:
+**Part A** is the five-step creation wizard, which ends the moment the draft
+exists. **Part B** is everything afterwards, done on the tender's own detail
+page — including appointing the evaluators, which the wizard never asks about.
+
+#### Part A — the creation wizard
 
 **Step 1 — Basics**
 | Field | Value |
@@ -679,45 +913,107 @@ still tracking the head, and click **Next**.
 | Currency | `LKR` |
 | Forfeit on withdrawal | unchecked |
 
-**Step 5 — Review** → **Create draft tender**.
+**Step 5 — Review** → **Create draft tender**. That is the end of the wizard.
 
-**Now on the tender detail page, in order:**
+> **"Do I pick the evaluators during creation?"** — **No.** The wizard has no
+> evaluator step; Basics → Criteria → Gates → Eligibility → Review is all of it,
+> and the tender is created with an **empty evaluator panel**. You appoint
+> Charlie, Dave and Eve by hand afterwards, on the tender detail page — that is
+> Part B below, and it is the first thing you do there. It matters because
+> `MinEvaluators = 3`: the award fails with `TooFewEvaluators` if you reach the
+> end without a full panel, and by then the portal has stopped offering the
+> Appoint control.
 
-1. **Officer actions → Publish tender** (as **Alice**). State moves to
-   *Published — Q&A*.
-2. **Evaluator panel** (still as **Alice**): pick **Charlie** from the dropdown
-   → **Appoint**. Repeat for **Dave**, then **Eve**. **Do this now** — the
-   Appoint control only renders while the tender is in `Draft`, `Published` or
-   `Submission`, and there is no other way to appoint from the portal once
-   submission closes. See §6.1.
-3. Switch the account dropdown to **Charlie** and the role dropdown to
-   **Evaluator**. **Scoring panel → Conflict of interest declaration** →
-   **Declare: no conflict**. Repeat as **Dave**, then **Eve**. (Declaring also
-   activates scoring rights — the officer's `activateEvaluator` call happens
-   automatically behind this button.)
-4. *(optional)* **Q&A panel**: as **Bob**, type a question, e.g.
+---
+
+#### Part B — on the tender detail page
+
+Creating the draft lands you on the tender's own page. These are individual
+actions rather than wizard steps, so the numbering starts again at 1. Steps 1–2
+are deliberately done **before** publishing: appointing is the one action whose
+window closes, and everything in it is legal while the tender is still `Draft`.
+
+**Where things are on this page.** Two columns at desktop width — and if a card
+below isn't on your screen at all, check the two header dropdowns before
+anything else (§5, *"The guide says click X and there is no X"*):
+
+| Column | Cards, top to bottom |
+|---|---|
+| **Left / wide** (read + appoint) | Stepper · Criteria · **Gates** · Documents · **Q&A** · **Bidders** · **Evaluator panel** · Evaluation results · **Award outcome** · Challenge log |
+| **Right / narrow** (the action buttons) | **Officer actions** · **Bid panel** · **Conflict declaration / Scoring** |
+
+Below `lg` width the page is one column and the right-hand cards stack at the
+**bottom**, under everything else.
+
+1. **Appoint three evaluators — do this first, as Alice.** In the **Evaluator
+   panel** (left column) pick **Charlie** → **Appoint**, then repeat for **Dave**
+   and **Eve**.
+
+   The dropdown lists only accounts whose **role lens** currently reads
+   `Evaluator` (Charlie, Dave, Eve by default), minus anyone already appointed.
+   The whole control disappears in two situations, both deliberate:
+
+   | It vanishes when | Because |
+   |---|---|
+   | three evaluators are appointed | `MinEvaluators` is met and the portal will not offer a fourth |
+   | the tender leaves `Submission` | the portal renders it only in `Draft`, `Published` and `Submission` |
+
+   The *pallet* imposes no state rule here — `appoint_evaluator` only requires
+   that you are the officer and that the appointee is neither a bidder nor the
+   officer/entity (§6.1). The restriction is the portal's. But since the portal
+   gives you no way back, treat it as one-way and appoint now.
+
+2. **Each evaluator declares a conflict position.** Switch the **account**
+   dropdown to **Charlie** *and* the **role** dropdown to **Evaluator** — both,
+   because the declaration card does not render at all unless the selected
+   account is an appointed evaluator *and* its role lens says `Evaluator`. A
+   missing card almost always means the role lens is still on something else.
+
+   Then **Conflict of interest declaration → Declare: no conflict**. Repeat as
+   **Dave**, then **Eve**.
+
+   Declaring also activates scoring rights — the officer's `activateEvaluator`
+   call is dispatched automatically behind that button, so there is no separate
+   activation step. The Evaluator panel should now list all three as
+   `No conflict · declared #…`. Doing this in `Draft` means none of it is racing
+   the gate clock later.
+
+3. **Officer actions → Publish tender** (back as **Alice**, and set the role lens
+   back to `Officer`). The card is the **top one in the right-hand column**;
+   `Publish tender` is the only button in it while the tender is `Draft`, and it
+   disappears once clicked. State moves to *Published — Q&A*.
+4. *(optional)* **Q&A panel** (left column, under Documents): as **Bob**, type a question, e.g.
    `Is milling depth specified separately?` → **Submit question**. Switch to
    **Alice**, type an answer, click **Answer**.
 5. Wait for the block chip to pass `questionsCloseAt` (state flips to
    *Submission open* on its own — no button).
-6. **Bid panel** (as **Bob**, role **Bidder**): Documents field →
+6. **Bid panel** (as **Bob**, role lens **Bidder** — the card only appears in the
+   **right-hand column** once that lens is set): Documents field →
    `resurfacing-proposal-v1.pdf`. Price schedule → one line, unit price
    `10000000000`, qty `1`. Click **Submit bid**.
 7. Wait for the block chip to pass `submissionCloseAt` (state auto-flips to
    *Closed*).
-8. **Officer actions → Open tender (start reveal window)** (as **Alice**).
-   Disabled until the current block reaches `openingAt` — the button's
-   tooltip tells you the block it's waiting for.
+8. **Officer actions → Open tender (start reveal window)** (as **Alice**,
+   right-hand column). This button only exists while the state is `Closed` —
+   if the card looks empty, the tender hasn't reached `Closed` yet. It stays
+   grey until the current block reaches `openingAt`, and the small grey caption
+   under it names that block.
 9. Wait for the block chip to pass `openingEndAt` (state auto-flips to
    *Evaluation*).
-10. As **Charlie**: **Scoring panel** → Bid dropdown → select Bob's bid →
-    score each criterion (e.g. Price `85`, Capability `78`) → optional
-    comment text → **Submit scores**. Repeat as **Dave**, then **Eve**, with
-    your own scores.
-11. **Officer actions → Propose award** (as **Alice**): pick Bob's bid,
-    rationale → `Highest weighted score, price within engineer's estimate.`
-    → **Propose award**.
-12. **Award outcome panel → Approve award (governed call)**. Any connected
+10. As **Charlie** (role lens back to **Evaluator**): the **Scoring panel**
+    replaces the declaration card in the **right-hand column** once you've
+    declared. Bid dropdown → select Bob's bid → score each criterion (e.g.
+    Price `85`, Capability `78`) → optional comment text → **Submit scores**.
+    Repeat as **Dave**, then **Eve**, with your own scores.
+11. **Officer actions → Propose award** (as **Alice**, right-hand column). In
+    `Evaluation` the card shows a ranked results list, then an awardee
+    dropdown and a rationale box — both are required before the button
+    enables. Pick Bob's bid, rationale →
+    `Highest weighted score, price within engineer's estimate.` →
+    **Propose award**.
+12. **Award outcome panel** — this one is in the **left column**, near the
+    bottom, and only appears once an award exists → **Approve award (governed
+    call)**. Any connected
     account can click this — the portal dispatches it through `sudo` using
     the chain's own sudo key, not whichever account is selected. State moves
     to *Standstill*.
@@ -766,10 +1062,11 @@ for you.
 
 **Create draft tender**, then:
 
-1. **Publish tender** (Alice).
-2. **Appoint Charlie, Dave and Eve now** (Alice, Evaluator panel), then declare
-   no conflict as each of them — same reason as Tender 1 step 2: the Appoint
-   control disappears once submission closes.
+1. **Appoint Charlie, Dave and Eve** (Alice, Evaluator panel), then declare no
+   conflict as each of them — same as Tender 1 Part B steps 1–2, and for the same
+   reason: the Appoint control disappears once three are appointed or once
+   submission closes. Doing it while still in `Draft` is simplest.
+2. **Publish tender** (Alice).
 3. **Ask a question blind**: as **Bob**, the Q&A form has no name attached to
    what you type — that's the `blind_questions` flag from step 1 at work.
 4. Wait past `questionsCloseAt`.
@@ -840,12 +1137,12 @@ validation will block **Next** with the same rule the pallet enforces.
 Exercises `publishShortlist` and the `shortlistFrom` chaining the single-run
 walkthroughs skip.
 
-> **Read this before starting Tender 4.** It is the one walkthrough here that
-> **cannot be completed through the portal**. There is no Publish shortlist
-> button: `LiveChainApi.publishShortlist()` exists but no component calls it
-> (§5, Known gaps). To get past the shortlist step you have to send
-> `tenderChain.publishShortlist(tenderId, [bidderAddress])` from Polkadot.js
-> Apps as Alice. Everything either side of that step works normally.
+> **This one now runs entirely in the portal.** Earlier revisions of this guide
+> sent you to Polkadot.js Apps for the shortlist step because no component
+> called `publishShortlist`. The Officer actions card now renders a **Publish
+> shortlist** block whenever an EOI is in `Evaluation`, so no external tool is
+> needed. If you don't see it, check you are on the EOI (not the follow-on RFT)
+> and that it has actually reached `Evaluation`.
 
 **Tender 4a (the EOI)**
 | Field | Value |
@@ -860,15 +1157,24 @@ walkthroughs skip.
 Criteria: `Qualifications` — weight `100`. Gates: leave the prefilled
 ~15-minute schedule.
 
-**Create draft tender → Publish tender.** Have **Bob** submit a bid (any
-documents/price — EOI bids are just expressions of interest here). Once past
-`submissionCloseAt`:
+**Create draft tender → Publish tender.** Have **Bob** submit a bid — an EOI is
+always `Sealed`, so that is a commit then a reveal, exactly as in Tender 2.
 
-- **Publish the shortlist** — the portal has no button for this. In Polkadot.js
-  Apps, **Developer → Extrinsics**, signed by **Alice**:
-  `tenderChain.publishShortlist(tenderId = <4a's id>, bidders = [Bob])`.
-  Back in the portal the state becomes *Awarded* in its mapping (the pallet's
-  terminal EOI state is `Shortlisted`).
+Then take it all the way to `Evaluation`, which is further than it may look:
+
+1. Wait past `submissionCloseAt` → **Open tender** (Alice).
+2. **Reveal** as Bob, before `openingEndAt`.
+3. Wait past `openingEndAt` → state flips to *Evaluation*.
+
+Only now does the shortlist step become possible. The pallet requires **state
+`Evaluation`** (`BadState` otherwise) and will only accept a supplier whose
+reveal was *valid* — a disqualified or never-revealed bidder fails with
+`InvalidShortlistEntry`, which is why the checkbox list only offers bidders who
+revealed successfully. No evaluators or scores are needed for an EOI.
+
+- **Officer actions → Shortlist suppliers** (as **Alice**): tick **Bob** →
+  **Publish shortlist**. The tender moves to the pallet's terminal EOI state
+  `Shortlisted`, which the portal's status mapping displays as *Awarded*.
 
 **Tender 4b (the follow-on RFT)** — create a second tender:
 | Field | Value |

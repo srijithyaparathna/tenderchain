@@ -8,6 +8,7 @@ import type { ApiPromise } from '@polkadot/api';
 import { blake2AsHex, blake2AsU8a } from '@polkadot/util-crypto';
 import { hexToU8a, u8aConcat } from '@polkadot/util';
 import type { BidMode, PriceLineItem, TenderKind, TenderState } from '../types';
+import { contentHash } from '../lib/hashing';
 
 // --- enums -----------------------------------------------------------------
 
@@ -88,14 +89,25 @@ export function randomSalt32(): string {
 }
 
 export interface ChainPriceLine {
-  itemId: number;
+  /** 0x-prefixed 32-byte hash — the pallet's `ItemId`. */
+  itemId: string;
   amount: bigint;
+}
+
+/**
+ * A price line's id: the hash of its position and description. Deterministic,
+ * so the commit and the later reveal build identical lines; and because the
+ * description is hashed in, editing it between commit and reveal changes the
+ * commitment preimage and voids the bid, exactly as editing a price does.
+ */
+export function priceLineId(index: number, item: PriceLineItem): string {
+  return contentHash(`item:${index}:${item.description}`);
 }
 
 /** The portal's per-item lines flatten to the pallet's `{item_id, amount}`. */
 export function toChainPriceLines(items: PriceLineItem[]): ChainPriceLine[] {
   return items.map((item, index) => ({
-    itemId: index,
+    itemId: priceLineId(index, item),
     amount: BigInt(Math.round(item.qty * item.unitPrice)),
   }));
 }
