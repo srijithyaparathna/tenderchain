@@ -73,10 +73,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, [connection]);
 
+  // The header's role switcher edits the current account; mirror it into the
+  // list so role-filtered pickers (e.g. the officer select) see the change.
+  const selectAccount = (a: AccountRef | null) => {
+    setCurrentAccount(a);
+    if (a) setAccounts((prev) => prev.map((x) => (x.address === a.address ? { ...x, role: a.role } : x)));
+  };
+
   const value: AppContextValue = {
     accounts,
     currentAccount,
-    setCurrentAccount,
+    setCurrentAccount: selectAccount,
     currentBlock,
     finalizedBlock,
     constants,

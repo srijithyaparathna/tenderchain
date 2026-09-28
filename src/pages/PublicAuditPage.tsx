@@ -30,7 +30,15 @@ export function PublicAuditPage() {
         <span className="mb-1 block text-xs font-medium text-slate-500">Select a tender to audit</span>
         <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full max-w-md rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-400">
           <option value="">— Select —</option>
-          {tenders.map((t) => <option key={t.id} value={t.id}>{t.id} — {t.title}</option>)}
+          {tenders.map((t) => {
+            // Titles are not unique; a short id only appears when two collide.
+            const clash = tenders.some((o) => o.id !== t.id && o.title === t.title);
+            return (
+              <option key={t.id} value={t.id} title={t.id}>
+                {clash ? `${t.title} (${t.id.slice(0, 8)}…)` : t.title}
+              </option>
+            );
+          })}
         </select>
       </label>
 

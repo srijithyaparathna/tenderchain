@@ -89,9 +89,12 @@ export function TenderListPage() {
                 </div>
                 <h3 className="mb-1 text-sm font-semibold text-slate-900">{t.title}</h3>
                 <p className="mb-3 line-clamp-2 text-xs text-slate-500">{t.summary}</p>
-                <div className="mb-3 flex items-center justify-between text-xs text-slate-500">
-                  <span>{t.entity}</span>
-                  <span className="mono">{t.id}</span>
+                <div className="mb-3 flex items-center justify-between gap-3 text-xs text-slate-500">
+                  <span className="min-w-0 truncate" title={t.entity}>{t.entity}</span>
+                  {/* Live tender ids are 32-byte hashes; the full id is in the tooltip. */}
+                  <span className="mono shrink-0 text-slate-400" title={t.id}>
+                    {t.id.length > 20 ? `${t.id.slice(0, 8)}…${t.id.slice(-6)}` : t.id}
+                  </span>
                 </div>
                 <div className="mb-3">
                   <HashTag hash={t.noticeHash} explain="Notice hash — the on-chain commitment to this tender's published notice; any later edit would change this hash." />

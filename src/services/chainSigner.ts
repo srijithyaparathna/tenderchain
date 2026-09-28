@@ -46,6 +46,18 @@ function sudoInnerError(api: ApiPromise, events: EventRecord[]): ChainCallError 
   return null;
 }
 
+/** Whether this page can sign for `address`: a dev pair, or an injected extension account. */
+async function canSign(address: string): Promise<boolean> {
+  if (getDevPair(address)) return true;
+  try {
+    const { web3FromAddress } = await import('@polkadot/extension-dapp');
+    await web3FromAddress(address);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function resolveSigner(address: string) {
   const pair = getDevPair(address);
   if (pair) return { who: pair as never, options: {} };
@@ -106,10 +118,12 @@ export async function submitSudo(
   preferred?: string,
 ): Promise<EventRecord[]> {
   const sudoKey = (await api.query.sudo.key()).toString();
-  const signer = getDevPair(sudoKey) ? sudoKey : (preferred ?? sudoKey);
-  if (!getDevPair(signer)) {
+  // Only the sudo key itself can dispatch `sudo.sudo`, whether it lives in the
+  // dev keyring or in the signing extension.
+  const signer = (await canSign(sudoKey)) ? sudoKey : (preferred ?? sudoKey);
+  if (!(await canSign(signer))) {
     throw new ChainCallError(
-      `This call needs Root. The sudo key is ${sudoKey}, which none of the loaded accounts can sign for.`,
+      `This call needs Root. The sudo key is ${sudoKey}, which none of the loaded accounts can sign for. Import that account into the extension and allow it for this site.`,
     );
   }
   return submit(api, api.tx.sudo.sudo(call), signer);

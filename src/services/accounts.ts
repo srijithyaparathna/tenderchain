@@ -8,7 +8,7 @@
 
 import { Keyring } from '@polkadot/keyring';
 import type { KeyringPair } from '@polkadot/keyring/types';
-import { cryptoWaitReady } from '@polkadot/util-crypto';
+import { cryptoWaitReady, decodeAddress, encodeAddress } from '@polkadot/util-crypto';
 import type { AccountRef, Role } from '../types';
 
 export type AccountSource = 'extension' | 'dev';
@@ -49,6 +49,15 @@ export async function devAccounts(ss58Format: number): Promise<AccountRef[]> {
   });
 }
 
+// An extension account holding a well-known dev key (e.g. //Alice imported
+// into polkadot.js) gets that key's default role. Both sides are re-encoded with
+// the generic prefix so the extension's SS58 format does not matter. Anything else starts as Public.
+async function devRoleByPublicKey(): Promise<Map<string, Role>> {
+  await cryptoWaitReady();
+  const keyring = new Keyring({ type: 'sr25519' });
+  return new Map(DEV_ACCOUNTS.map(({ suri, role }) => [encodeAddress(keyring.createFromUri(suri).publicKey), role]));
+}
+
 async function extensionAccounts(): Promise<AccountRef[]> {
   try {
     // Dynamic so the extension bridge (and its polyfills) stay out of the
@@ -57,10 +66,11 @@ async function extensionAccounts(): Promise<AccountRef[]> {
     const enabled = await web3Enable('TenderChain');
     if (enabled.length === 0) return [];
     const injected = await web3Accounts();
+    const devRoles = await devRoleByPublicKey();
     return injected.map((a) => ({
       address: a.address,
       name: a.meta.name ?? a.address.slice(0, 8),
-      role: 'Public' as Role,
+      role: devRoles.get(encodeAddress(decodeAddress(a.address))) ?? ('Public' as Role),
     }));
   } catch {
     // No extension, or the user declined the authorisation prompt.

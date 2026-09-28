@@ -15,7 +15,18 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
   const [pick, setPick] = useState('');
   const { busy, error, clearError, run } = useChainAction();
 
-  const evaluatorPool = accounts.filter((a) => a.role === 'Evaluator' && !tender.evaluators.includes(a.address));
+  // Mirrors `appoint_evaluator`: bidders on this tender and its officer can
+  // never sit on the panel, so they are not offered.
+  const bidders = new Set([...tender.commitments.map((c) => c.bidder), ...tender.revealedBids.map((b) => b.bidder)]);
+  const evaluatorPool = accounts.filter(
+    (a) =>
+      a.role === 'Evaluator' &&
+      !tender.evaluators.includes(a.address) &&
+      !bidders.has(a.address) &&
+      a.address !== tender.officer,
+  );
+  // The pallet only freezes the panel once the tender is contracted or cancelled.
+  const canAppoint = tender.state !== 'Contracted' && tender.state !== 'Cancelled';
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
   const appoint = () => {
@@ -68,7 +79,7 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
           </ul>
         )}
 
-        {!enoughEvaluators && (tender.state === 'Draft' || tender.state === 'Published' || tender.state === 'Submission') && (
+        {canAppoint && (!enoughEvaluators || evaluatorPool.length > 0) && (
           <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md bg-slate-50 p-2.5">
             <select
               value={pick}

@@ -33,10 +33,22 @@ interface GateForm {
  * a target shorter than that floor is clamped up to it rather than producing a
  * tender that could never be opened.
  */
-const TEST_RUN_MINUTES = 15;
+const TEST_RUN_MINUTES = 25;
 
 /** Publish, ask a question, get a bid in — the phase before opening needs this many blocks. */
-const MIN_SUBMISSION_BLOCKS = 30;
+const MIN_SUBMISSION_BLOCKS = 60;
+
+/** Blocks from creation until the tender publishes (10 blocks ≈ 1 min at 6s). */
+const PUBLISH_DELAY_BLOCKS = 10;
+
+/** Blocks the Q&A window stays open after publication (20 blocks ≈ 2 min). */
+const QUESTION_BLOCKS = 20;
+
+/**
+ * Blocks past `openingAt` the officer still has to click Open before the
+ * remaining window drops under `MinRevealWindow` (50 blocks ≈ 5 min at 6s).
+ */
+const OPEN_SLACK_BLOCKS = 50;
 
 /**
  * A whole-lifecycle schedule sized to `TEST_RUN_MINUTES`, anchored on `now`
@@ -51,19 +63,19 @@ const MIN_SUBMISSION_BLOCKS = 30;
  * `openingEndAt - openingAt` is the one gap that cannot be compressed: the
  * pallet rejects `open_tender` with `RevealWindowTooShort` below
  * `MinRevealWindow`, and it measures that from the block the officer actually
- * clicks Open, not from `openingAt` — hence the `+ 5` blocks of slack.
+ * clicks Open, not from `openingAt` — hence `OPEN_SLACK_BLOCKS` on top.
  */
 function testRunGates(now: number, constants: ChainConstants | null): GateForm {
   const blockSeconds = constants?.avgBlockTimeSeconds ?? 6;
-  const reveal = (constants?.minRevealWindow ?? 100) + 5;
+  const reveal = (constants?.minRevealWindow ?? 100) + OPEN_SLACK_BLOCKS;
   const standstill = Math.max(constants?.minStandstillPeriod ?? 0, 10);
 
   const targetBlocks = Math.round((TEST_RUN_MINUTES * 60) / blockSeconds);
   const submissionClose = Math.max(MIN_SUBMISSION_BLOCKS, targetBlocks - reveal - standstill);
 
   return {
-    publishAt: now + 2,
-    questionsCloseAt: now + 12,
+    publishAt: now + PUBLISH_DELAY_BLOCKS,
+    questionsCloseAt: now + PUBLISH_DELAY_BLOCKS + QUESTION_BLOCKS,
     submissionCloseAt: now + submissionClose,
     openingAt: now + submissionClose,
     openingEndAt: now + submissionClose + reveal,
