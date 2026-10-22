@@ -6,6 +6,8 @@ import { Countdown } from '../components/common/Countdown';
 import { HashTag } from '../components/common/HashTag';
 import { TENDER_KIND_LABEL, type TenderKind, type TenderState } from '../types';
 import { nextGate } from '../lib/gates';
+import { useApp } from '../state/AppContext';
+import { ActionError } from '../components/common/ActionError';
 
 const ALL_STATES: (TenderState | 'All')[] = [
   'All', 'Draft', 'Published', 'Submission', 'Closed', 'Opening', 'Evaluation', 'Standstill', 'Contracted', 'Cancelled',
@@ -13,7 +15,8 @@ const ALL_STATES: (TenderState | 'All')[] = [
 const ALL_KINDS: (TenderKind | 'All')[] = ['All', 'RFQ', 'RFT', 'EOI', 'Panel', 'JobTask'];
 
 export function TenderListPage() {
-  const { tenders, loading } = useTenders();
+  const { tenders, loading, error } = useTenders();
+  const { connection, chainError, endpoint } = useApp();
   const [state, setState] = useState<TenderState | 'All'>('All');
   const [kind, setKind] = useState<TenderKind | 'All'>('All');
   const [entity, setEntity] = useState('All');
@@ -65,7 +68,24 @@ export function TenderListPage() {
         <span className="ml-auto text-xs text-slate-400">{filtered.length} of {tenders.length} tenders</span>
       </div>
 
-      {loading ? (
+      {error && <div className="mb-4"><ActionError error={error} /></div>}
+
+      {chainError ? (
+        <div className="mb-4">
+          <ActionError error={{ title: 'This node cannot run the portal.', hint: chainError }} />
+        </div>
+      ) : connection === 'disconnected' && tenders.length === 0 ? (
+        <div className="mb-4">
+          <ActionError
+            error={{
+              title: `No TenderChain node is answering at ${endpoint}.`,
+              hint: 'Start the node (see TESTING.md §2). The portal reconnects on its own once it is up.',
+            }}
+          />
+        </div>
+      ) : null}
+
+      {loading && connection !== 'disconnected' ? (
         <div className="py-20 text-center text-sm text-slate-400">Loading tenders…</div>
       ) : filtered.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 py-16 text-center text-sm text-slate-400">

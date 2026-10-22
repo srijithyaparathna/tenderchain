@@ -57,6 +57,11 @@ export interface ChainApi {
   createTender(input: CreateTenderInput): Promise<Tender>;
   publishTender(id: string): Promise<void>;
   cancelTender(id: string, reason: string): Promise<void>;
+  /**
+   * Erase a tender that never reached the public record (a draft, or a draft
+   * cancelled before publication). Published tenders can only be cancelled.
+   */
+  deleteTender(id: string): Promise<void>;
   answerQuestion(id: string, qaId: string, answer: string): Promise<void>;
   appointEvaluator(id: string, evaluator: string): Promise<void>;
   openTender(id: string): Promise<void>;

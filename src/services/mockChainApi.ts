@@ -133,6 +133,7 @@ export class MockChainApi implements ChainApi {
       blindQuestions: input.blindQuestions,
       shortlistFromTenderId: input.shortlistFromTenderId,
       evaluators: [],
+      activeEvaluators: [],
       conflictDeclarations: [],
       commitments: [],
       revealedBids: [],
@@ -149,13 +150,26 @@ export class MockChainApi implements ChainApi {
     this.mutate(id, (t) => {
       if (t.state !== 'Draft') throw new Error('Only draft tenders can be published');
       t.state = 'Published';
+      t.publishedAtBlock = this.getCurrentBlock();
     });
   }
 
   async cancelTender(id: string): Promise<void> {
     this.mutate(id, (t) => {
+      if (t.state === 'Contracted' || t.state === 'Cancelled') throw new Error('tenderChain.BadState');
       t.state = 'Cancelled';
     });
+  }
+
+  // Mirrors `delete_tender`: only a tender that never reached the public record.
+  async deleteTender(id: string): Promise<void> {
+    const t = this.tenders.find((x) => x.id === id);
+    if (!t) throw new Error('tenderChain.TenderNotFound');
+    if (t.publishedAtBlock !== undefined || (t.state !== 'Draft' && t.state !== 'Cancelled')) {
+      throw new Error('tenderChain.TenderNotDeletable');
+    }
+    this.tenders = this.tenders.filter((x) => x.id !== id);
+    this.notifyAll();
   }
 
   async answerQuestion(id: string, qaId: string, answer: string): Promise<void> {
@@ -314,6 +328,8 @@ export class MockChainApi implements ChainApi {
           notes,
         });
       }
+      t.activeEvaluators = t.activeEvaluators.filter((e) => e !== evaluator);
+      if (!hasConflict) t.activeEvaluators.push(evaluator);
     });
   }
 

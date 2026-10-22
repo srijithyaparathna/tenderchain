@@ -1,5 +1,5 @@
 import { useCallback, useState } from 'react';
-import { describeChainError } from '../lib/errors';
+import { explainError, type ErrorView } from '../lib/errors';
 
 /**
  * The single place a rejected `chainApi` call becomes visible.
@@ -16,7 +16,7 @@ import { describeChainError } from '../lib/errors';
  */
 export function useChainAction() {
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<ErrorView | null>(null);
 
   const clearError = useCallback(() => setError(null), []);
 
@@ -27,12 +27,17 @@ export function useChainAction() {
       await fn();
       return true;
     } catch (e) {
-      setError(describeChainError(e));
+      // Logged too, so the raw object (with its stack) is there for a developer.
+      console.error('[tenderchain] action failed', e);
+      setError(explainError(e));
       return false;
     } finally {
       setBusy(false);
     }
   }, []);
 
-  return { busy, error, clearError, run };
+  /** Show a client-side validation failure in the same place as a chain one. */
+  const fail = useCallback((title: string, hint?: string) => setError({ title, hint }), []);
+
+  return { busy, error, clearError, run, fail };
 }

@@ -5,7 +5,7 @@ import { RoleGatedButton } from '../common/RoleGatedButton';
 import { ActionError } from '../common/ActionError';
 import { useChainAction } from '../../hooks/useChainAction';
 import { useApp } from '../../state/AppContext';
-import { requireBidder, requireOfficer } from '../../lib/permissions';
+import { requireBidder, requireGovernance } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
 import { formatBlock } from '../../lib/blocks';
 
@@ -16,7 +16,7 @@ const STATUS_STYLE: Record<Tender['challenges'][number]['status'], string> = {
 };
 
 export function ChallengeLogPanel({ tender }: { tender: Tender }) {
-  const { accounts, currentAccount } = useApp();
+  const { accounts, currentAccount, currentBlock } = useApp();
   const [grounds, setGrounds] = useState('');
   const [resolving, setResolving] = useState<string | null>(null);
   const [rationale, setRationale] = useState('');
@@ -24,9 +24,25 @@ export function ChallengeLogPanel({ tender }: { tender: Tender }) {
 
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
+  // Mirrors `lodge_challenge`: only during standstill, only by a bidder who
+  // lodged a bid, never by the awardee, and always with written grounds.
+  const standstillEnd =
+    tender.award?.approvedAtBlock !== undefined ? tender.award.approvedAtBlock + tender.gates.standstillPeriod : undefined;
   const lodgeDisabled =
     requireBidder(currentAccount) ||
-    (tender.state !== 'Standstill' ? 'Challenges can only be lodged during the standstill window.' : undefined);
+    (tender.state !== 'Standstill' || !tender.award?.approvedByGovernance
+      ? 'Challenges can only be lodged during the standstill window after an award.'
+      : undefined) ||
+    (standstillEnd !== undefined && currentBlock > standstillEnd
+      ? `The standstill window ended at block #${standstillEnd.toLocaleString()}.`
+      : undefined) ||
+    (currentAccount && !tender.commitments.some((c) => c.bidder === currentAccount.address)
+      ? 'Only a bidder who submitted a bid on this tender can challenge it.'
+      : undefined) ||
+    (currentAccount && tender.award?.awardedBidder === currentAccount.address
+      ? 'The winning bidder cannot challenge its own award.'
+      : undefined) ||
+    (!grounds.trim() ? 'Write the grounds for your challenge.' : undefined);
 
   const lodge = () => {
     if (!currentAccount || !grounds.trim()) return;
@@ -89,7 +105,8 @@ export function ChallengeLogPanel({ tender }: { tender: Tender }) {
                     </div>
                   ) : (
                     <div className="mt-2">
-                      <RoleGatedButton variant="secondary" disabledReason={requireOfficer(currentAccount, tender)} onClick={() => setResolving(c.id)}>
+                      {/* `resolve_challenge` is bound to the governed ChallengeResolverOrigin, not the officer. */}
+                      <RoleGatedButton variant="governance" disabledReason={requireGovernance(currentAccount)} onClick={() => setResolving(c.id)}>
                         Resolve
                       </RoleGatedButton>
                     </div>

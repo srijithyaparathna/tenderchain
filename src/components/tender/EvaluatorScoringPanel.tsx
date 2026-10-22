@@ -11,12 +11,12 @@ import { contentHash } from '../../lib/hashing';
 import { isOutlierScore } from '../../lib/scoring';
 
 export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
-  const { currentAccount } = useApp();
+  const { currentAccount, constants } = useApp();
   const [notes, setNotes] = useState('');
   const [bidId, setBidId] = useState('');
   const [scores, setScores] = useState<Record<string, number>>({});
   const [comments, setComments] = useState<Record<string, string>>({});
-  const { busy, error, clearError, run } = useChainAction();
+  const { busy, error, clearError, run, fail } = useChainAction();
 
   if (!currentAccount || currentAccount.role !== 'Evaluator' || !tender.evaluators.includes(currentAccount.address)) return null;
 
@@ -53,6 +53,8 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
     );
   }
 
+  const isActive = tender.activeEvaluators.includes(currentAccount.address);
+
   if (myDeclaration.hasConflict) {
     return (
       <Card>
@@ -61,6 +63,26 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
           <p className="rounded-md bg-red-50 p-2.5 text-sm text-red-700">
             You declared a conflict of interest on this tender and are recused from scoring.
           </p>
+        </CardBody>
+      </Card>
+    );
+  }
+
+  // Declared "no conflict" but scoring rights never went live — activation is
+  // the officer's call and can fail separately (e.g. the officer cannot pay
+  // fees). Re-declaring re-runs both steps.
+  if (!isActive) {
+    return (
+      <Card>
+        <CardHeader title="Awaiting activation" />
+        <CardBody>
+          <p className="mb-2 rounded-md bg-amber-50 p-2.5 text-sm text-amber-800">
+            Your declaration is lodged, but your scoring rights have not been activated by the officer yet.
+          </p>
+          <RoleGatedButton disabledReason={gateReason} disabled={busy} onClick={() => declareConflict(false)}>
+            Re-declare no conflict and activate
+          </RoleGatedButton>
+          <ActionError error={error} onDismiss={clearError} />
         </CardBody>
       </Card>
     );
@@ -78,7 +100,11 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
   }
 
   const submit = () => {
-    if (!bidId) return;
+    if (!bidId) return fail('Select a bid to score.');
+    const missing = tender.criteria.filter((c) => scores[c.id] === undefined || Number.isNaN(scores[c.id]));
+    if (missing.length > 0) {
+      return fail(`Enter a score for every criterion — missing: ${missing.map((c) => c.name).join(', ')}.`, 'The chain only accepts a scoresheet covering exactly the locked criteria.');
+    }
     run(async () => {
       await chainApi.submitScores({
         tenderId: tender.id,
@@ -105,7 +131,8 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
         <label className="mb-1 block text-xs font-medium text-slate-500">Bid</label>
         <select value={bidId} onChange={(e) => setBidId(e.target.value)} className="mb-3 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-400">
           <option value="">Select a bid to score…</option>
-          {tender.revealedBids.map((b) => (
+          {/* Voided reveals cannot be scored (`BidNotScoreable`). */}
+          {tender.revealedBids.filter((b) => !b.disqualified).map((b) => (
             <option key={b.id} value={b.id}>{b.bidderName} — {b.totalPrice.toLocaleString()}</option>
           ))}
         </select>
@@ -122,13 +149,13 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
                 .map((s) => s.scores.find((x) => x.criterionId === c.id)?.score)
                 .filter((v): v is number => v !== undefined);
               const myScore = scores[c.id] ?? 0;
-              const outlier = peerScores.length > 0 && isOutlierScore(myScore, peerScores);
+              const outlier = isOutlierScore(myScore, peerScores, constants?.scoreVarianceThreshold);
               return (
                 <div key={c.id} className="rounded-md border border-slate-100 p-2.5">
                   <div className="mb-1 flex items-center justify-between">
                     <span className="text-sm font-medium text-slate-700">{c.name} <span className="text-xs text-slate-400">({c.weight}%)</span></span>
                     {outlier && (
-                      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700" title="This score diverges significantly from other evaluators' scores on this criterion.">
+                      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700" title="This score differs from another evaluator's by more than the chain's variance threshold — submitting it will raise a ScoreVarianceFlagged event for probity review.">
                         ⚠ Variance flag
                       </span>
                     )}
@@ -139,7 +166,13 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
                       min={0}
                       max={c.maxScore}
                       value={scores[c.id] ?? ''}
-                      onChange={(e) => setScores({ ...scores, [c.id]: Math.min(c.maxScore, Math.max(0, Number(e.target.value))) })}
+                      onChange={(e) =>
+                        setScores(
+                          e.target.value === ''
+                            ? Object.fromEntries(Object.entries(scores).filter(([k]) => k !== c.id))
+                            : { ...scores, [c.id]: Math.min(c.maxScore, Math.max(0, Math.round(Number(e.target.value)))) },
+                        )
+                      }
                       className="w-20 rounded-md border border-slate-300 px-2 py-1 text-sm outline-none focus:border-blue-400"
                     />
                     <span className="text-xs text-slate-400">/ {c.maxScore}</span>

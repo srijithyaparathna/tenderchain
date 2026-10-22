@@ -83,10 +83,25 @@ function readProposals(): Record<string, AwardProposal> {
   }
 }
 
-function writeProposal(tenderId: string, proposal: AwardProposal) {
+function writeProposal(tenderId: string, proposal: AwardProposal | null) {
   const all = readProposals();
-  all[tenderId] = proposal;
-  localStorage.setItem(PROPOSALS, JSON.stringify(all));
+  if (proposal) all[tenderId] = proposal;
+  else delete all[tenderId];
+  try {
+    localStorage.setItem(PROPOSALS, JSON.stringify(all));
+  } catch {
+    /* storage unavailable — the proposal lives only for this session */
+  }
+}
+
+/**
+ * The off-chain document a conflict declaration hash commits to. The pallet
+ * stores only the hash, so whether the evaluator declared a conflict is read
+ * back from here — and the portal never activates an evaluator who did.
+ */
+interface DeclarationContent {
+  hasConflict: boolean;
+  notes: string;
 }
 
 const num = (v: unknown): number => Number(v?.toString() ?? 0);
@@ -111,6 +126,7 @@ function readConstants(api: ApiPromise): ChainConstants {
     minEvaluators: num(c.minEvaluators),
     minRevealWindow: num(c.minRevealWindow),
     maxScore: num(c.maxScore),
+    scoreVarianceThreshold: num(c.scoreVarianceThreshold) || 30,
     // Not a chain constant: standstill is per tender (`standstill_period`).
     minStandstillPeriod: 1,
     avgBlockTimeSeconds: slotMs > 0 ? slotMs / 1000 : 6,
@@ -372,22 +388,30 @@ export class LiveChainApi implements ChainApi {
 
     const conflictDeclarations: ConflictDeclaration[] = [];
     const evaluatorList: string[] = [];
+    const activeEvaluators: string[] = [];
     for (const [key, value] of evaluators) {
       const evaluator = key.args[1].toString();
       evaluatorList.push(evaluator);
       const rec2 = (value as unknown as { unwrap(): Record<string, never> }).unwrap() as unknown as {
         appointedAt: unknown;
         conflictDeclaration: { isSome: boolean; unwrap(): { toString(): string } };
+        active: { toString(): string };
       };
+      const active = rec2.active.toString() === 'true';
+      if (active) activeEvaluators.push(evaluator);
       if (rec2.conflictDeclaration.isSome) {
         const hash = rec2.conflictDeclaration.unwrap().toString();
+        // The pallet stores a declaration hash, not a yes/no: whether a
+        // conflict exists is in the off-chain document. Where this browser
+        // does not hold it, an *active* evaluator was cleared by the officer,
+        // and an inactive one with a declaration is treated as conflicted —
+        // the cautious reading, since scoring stays closed to them either way.
+        const doc = getJson<DeclarationContent>(hash);
         conflictDeclarations.push({
           evaluator,
           declaredAtBlock: num(rec2.appointedAt),
-          // The pallet stores a declaration hash, not a yes/no: whether a
-          // conflict exists is in the off-chain document.
-          hasConflict: false,
-          notes: textOr(hash, `Declaration ${shortHash(hash)}`),
+          hasConflict: doc ? doc.hasConflict : !active,
+          notes: doc?.notes || textOr(hash, `Declaration ${shortHash(hash)}`),
         });
       }
     }
@@ -441,8 +465,13 @@ export class LiveChainApi implements ChainApi {
     });
 
     const outcomeOpt = outcome as unknown as { isSome: boolean; unwrap(): Record<string, never> };
+    const chainState = raw.state.toString();
     let award: Tender['award'];
-    if (outcomeOpt.isSome) {
+    // An upheld challenge remits the tender to `Evaluation` but leaves the old
+    // `Outcomes` entry in place. That award was overturned, so it must not be
+    // shown as standing — otherwise the officer's propose form stays hidden
+    // and the tender can never be re-awarded from the portal.
+    if (outcomeOpt.isSome && chainState !== 'Evaluation') {
       const o = outcomeOpt.unwrap() as unknown as {
         awardees: { toString(): string }[];
         rationaleHash: { toString(): string };
@@ -519,6 +548,7 @@ export class LiveChainApi implements ChainApi {
       shortlistFromTenderId: sourceOpt.isSome ? hexId(sourceOpt.unwrap()) : undefined,
       shortlistedBidders: shortlist.length > 0 ? shortlist.map(([k]) => k.args[1].toString()) : undefined,
       evaluators: evaluatorList,
+      activeEvaluators,
       conflictDeclarations,
       commitments: bidCommitments,
       revealedBids,
@@ -526,6 +556,7 @@ export class LiveChainApi implements ChainApi {
       award,
       challenges,
       createdAtBlock: num(raw.createdAt) || publishedAt,
+      publishedAtBlock: raw.publishedAt.isSome ? publishedAt : undefined,
     };
   }
 
@@ -685,6 +716,20 @@ export class LiveChainApi implements ChainApi {
     await this.send(api.tx.tenderChain.cancelTender(id, putText(reason)), rec.unwrap().entity.toString());
   }
 
+  async deleteTender(id: string): Promise<void> {
+    const t = await this.requireTender(id);
+    const api = this.mustApi();
+    // A node still running the runtime from before `delete_tender` existed
+    // would otherwise fail with an opaque "is not a function".
+    if (typeof api.tx.tenderChain.deleteTender !== 'function') {
+      throw new ChainCallError(
+        'The connected node’s runtime has no delete_tender call. Upgrade the runtime (spec_version 102 or later) and reload.',
+      );
+    }
+    await this.send(api.tx.tenderChain.deleteTender(id), t.officer);
+    writeProposal(id, null);
+  }
+
   async askQuestion(id: string, asker: string, question: string, blind: boolean): Promise<void> {
     const salt = blind ? randomSalt32() : ZERO_HASH;
     await this.send(
@@ -710,13 +755,19 @@ export class LiveChainApi implements ChainApi {
   }
 
   async declareConflict(id: string, evaluator: string, hasConflict: boolean, notes?: string): Promise<void> {
-    const text = notes?.trim() || (hasConflict ? 'Conflict declared' : 'No conflict declared');
+    const declaration: DeclarationContent = {
+      hasConflict,
+      notes: notes?.trim() || (hasConflict ? 'Conflict declared' : 'No conflict declared'),
+    };
     await this.send(
-      this.mustApi().tx.tenderChain.declareConflict(id, putText(text)),
+      this.mustApi().tx.tenderChain.declareConflict(id, putJson(declaration)),
       evaluator,
     );
+    // An evaluator who declared a conflict is recused: their scoring rights
+    // must never go live, so activation is skipped entirely.
+    if (hasConflict) return;
     // Appointment and activation are both the officer's calls; the portal
-    // activates straight after the declaration so scoring rights go live.
+    // activates straight after a clean declaration so scoring rights go live.
     const t = await this.requireTender(id);
     await this.send(this.mustApi().tx.tenderChain.activateEvaluator(id, evaluator), t.officer);
   }
@@ -766,8 +817,10 @@ export class LiveChainApi implements ChainApi {
     );
     // reveal_bid returns Ok on a hash mismatch; the failure is only an event.
     if (findEvent(events, 'tenderChain', 'RevealMismatch')) {
+      // Named like a runtime error so it gets the same explanation as one.
       throw new ChainCallError(
-        'RevealMismatch — the revealed content did not hash to the commitment. The bid is voided but stays on the public record.',
+        'tenderChain.RevealMismatch',
+        'The revealed content did not hash to the commitment. The bid is voided but stays on the public record.',
       );
     }
   }
@@ -827,6 +880,10 @@ export class LiveChainApi implements ChainApi {
     await this.sendSudo(
       api.tx.tenderChain.award(id, [awardee], hashOf(proposal.rationale)),
     );
+    // Dispatched: the chain's `Outcomes` is now the record. Dropping the local
+    // proposal means a later re-award (after an upheld challenge) starts clean.
+    writeProposal(id, null);
+    await this.refresh();
   }
 
   async lodgeChallenge(id: string, lodgedBy: string, grounds: string): Promise<void> {

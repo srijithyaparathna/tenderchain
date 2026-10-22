@@ -188,6 +188,8 @@ export interface Tender {
   shortlistFromTenderId?: string; // EOI -> RFT chaining
   shortlistedBidders?: string[];
   evaluators: string[];
+  /** Evaluators whose scoring rights are live (declared and activated). */
+  activeEvaluators: string[];
   conflictDeclarations: ConflictDeclaration[];
   commitments: BidCommitment[];
   revealedBids: RevealedBid[];
@@ -195,6 +197,8 @@ export interface Tender {
   award?: AwardRecord;
   challenges: Challenge[];
   createdAtBlock: number;
+  /** Block the tender was published at; undefined while it never was. */
+  publishedAtBlock?: number;
 }
 
 export interface ChainConstants {
@@ -203,4 +207,6 @@ export interface ChainConstants {
   maxScore: number;
   minStandstillPeriod: number; // blocks
   avgBlockTimeSeconds: number;
+  /** Pairwise per-criterion score spread that makes the chain emit ScoreVarianceFlagged. */
+  scoreVarianceThreshold: number;
 }

@@ -20,7 +20,16 @@ export function QAPanel({ tender }: { tender: Tender }) {
   const askDisabled =
     requireBidder(currentAccount) ||
     (currentBlock >= tender.gates.questionsCloseAt ? 'Questions closed at ' + formatBlock(tender.gates.questionsCloseAt) : undefined) ||
-    (tender.state !== 'Published' && tender.state !== 'Submission' ? 'Questions can only be asked once the tender is published.' : undefined);
+    // `ask_question` accepts questions only in the Q&A window (`QaWindow`).
+    (tender.state !== 'Published' ? 'Questions can only be asked during the Q&A window, after publication and before questions close.' : undefined) ||
+    (!question.trim() ? 'Type a question first.' : undefined);
+
+  // `answer_question` accepts answers while bids can still respond to them.
+  const answerDisabled =
+    requireOfficer(currentAccount, tender) ||
+    (tender.state !== 'Published' && tender.state !== 'Submission'
+      ? 'Answers can only be published during the Q&A or submission window.'
+      : undefined);
 
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
@@ -73,7 +82,8 @@ export function QAPanel({ tender }: { tender: Tender }) {
                       className="flex-1 rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-400"
                     />
                     <button
-                      disabled={busy}
+                      disabled={busy || !answerText.trim()}
+                      title={!answerText.trim() ? 'Type the answer first.' : undefined}
                       onClick={() => submitAnswer(qa.id)}
                       className="rounded-md bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                     >
@@ -84,7 +94,7 @@ export function QAPanel({ tender }: { tender: Tender }) {
                   <div className="mt-2">
                     <RoleGatedButton
                       variant="secondary"
-                      disabledReason={requireOfficer(currentAccount, tender)}
+                      disabledReason={answerDisabled}
                       onClick={() => setAnswering(qa.id)}
                     >
                       Answer

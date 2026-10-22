@@ -10,6 +10,7 @@ export const CONSTANTS: ChainConstants = {
   maxScore: 100,
   minStandstillPeriod: 150,
   avgBlockTimeSeconds: 6,
+  scoreVarianceThreshold: 30,
 };
 
 // Demo accounts covering every role. In a real integration these come from

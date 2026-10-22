@@ -8,7 +8,12 @@ import type { BidMode, ChainConstants, Criterion, TenderKind } from '../types';
 import { TENDER_KIND_LABEL } from '../types';
 import { weightSum } from '../lib/gates';
 import { blocksToDuration, formatBlock } from '../lib/blocks';
-import { describeChainError } from '../lib/errors';
+import { explainError, type ErrorView } from '../lib/errors';
+import { ActionError } from '../components/common/ActionError';
+
+/** `MaxTitleLen` / `MaxSummaryLen` in this runtime (bytes). */
+const MAX_TITLE_BYTES = 128;
+const MAX_SUMMARY_BYTES = 512;
 
 const STEPS = ['Basics', 'Criteria & weights', 'Gates', 'Eligibility & bond', 'Review'] as const;
 
@@ -83,6 +88,56 @@ function testRunGates(now: number, constants: ChainConstants | null): GateForm {
   };
 }
 
+type TimeUnit = 'min' | 'hour' | 'day';
+
+const UNIT_SECONDS: Record<TimeUnit, number> = { min: 60, hour: 3600, day: 86400 };
+const UNIT_LABEL: Record<TimeUnit, string> = { min: 'minutes', hour: 'hours', day: 'days' };
+
+interface Duration {
+  value: number;
+  unit: TimeUnit;
+}
+
+/**
+ * What the officer actually types: every gate as a time from now (and the
+ * standstill as a length of time), not as a block number. The chain still
+ * takes absolute blocks, so these are converted against the live head and the
+ * average block time — which also means the schedule keeps tracking the head
+ * however long the wizard sits open.
+ */
+type DurationForm = Record<keyof GateForm, Duration>;
+
+function toBlocks(d: Duration, blockSeconds: number): number {
+  return Math.ceil((Math.max(0, d.value) * UNIT_SECONDS[d.unit]) / blockSeconds);
+}
+
+/** The auto test-run schedule expressed as minutes from now. */
+function testRunDurations(constants: ChainConstants | null): DurationForm {
+  const blockSeconds = constants?.avgBlockTimeSeconds ?? 6;
+  const offsets = testRunGates(0, constants);
+  const minutes = (blocks: number): Duration => ({ value: +((blocks * blockSeconds) / 60).toFixed(2), unit: 'min' });
+  return {
+    publishAt: minutes(offsets.publishAt),
+    questionsCloseAt: minutes(offsets.questionsCloseAt),
+    submissionCloseAt: minutes(offsets.submissionCloseAt),
+    openingAt: minutes(offsets.openingAt),
+    openingEndAt: minutes(offsets.openingEndAt),
+    standstillPeriod: minutes(offsets.standstillPeriod),
+  };
+}
+
+function durationsToGates(now: number, d: DurationForm, blockSeconds: number): GateForm {
+  const at = (x: Duration) => now + toBlocks(x, blockSeconds);
+  return {
+    publishAt: at(d.publishAt),
+    questionsCloseAt: at(d.questionsCloseAt),
+    submissionCloseAt: at(d.submissionCloseAt),
+    openingAt: at(d.openingAt),
+    openingEndAt: at(d.openingEndAt),
+    standstillPeriod: toBlocks(d.standstillPeriod, blockSeconds),
+  };
+}
+
 /** Blocks from `now` to the last gate a full run has to wait out. */
 function runLength(gates: GateForm, now: number): number {
   return Math.max(0, gates.openingEndAt + gates.standstillPeriod - now);
@@ -112,16 +167,20 @@ export function CreateTenderWizard() {
     { id: 'c3', name: 'Past performance', description: '', weight: 20, maxScore: 100 },
   ]);
 
-  // Gates are only *state* once the officer has typed their own numbers in.
-  // Until then they are derived from the live head on every render, so the
-  // schedule stays correct however long the earlier steps take to fill in —
-  // these are absolute block numbers, and one computed when the wizard mounted
-  // (possibly before the first head arrived, at block 0) would be stale or
-  // already in the past by the time Create is clicked.
-  const [pinnedGates, setPinnedGates] = useState<GateForm | null>(null);
-  const autoGates = useMemo(() => testRunGates(currentBlock, constants), [currentBlock, constants]);
-  const gates = pinnedGates ?? autoGates;
-  const gatesPinned = pinnedGates !== null;
+  // The officer enters gates as times from now; they only become *state* once
+  // edited. Either way they are converted to absolute blocks against the live
+  // head on every render, so the schedule stays correct however long the
+  // earlier steps take to fill in — a block number computed when the wizard
+  // mounted (possibly before the first head arrived, at block 0) would be
+  // stale or already in the past by the time Create is clicked.
+  const blockSeconds = constants?.avgBlockTimeSeconds ?? 6;
+  const [pinnedDurations, setPinnedDurations] = useState<DurationForm | null>(null);
+  const autoDurations = useMemo(() => testRunDurations(constants), [constants]);
+  const durations = pinnedDurations ?? autoDurations;
+  const gates = useMemo(() => durationsToGates(currentBlock, durations, blockSeconds), [currentBlock, durations, blockSeconds]);
+  const gatesPinned = pinnedDurations !== null;
+  const setDuration = (key: keyof GateForm, patch: Partial<Duration>) =>
+    setPinnedDurations({ ...durations, [key]: { ...durations[key], ...patch } });
 
   const [credentials, setCredentials] = useState('');
   const [minReputation, setMinReputation] = useState(0);
@@ -138,22 +197,44 @@ export function CreateTenderWizard() {
     if (!(gates.submissionCloseAt <= gates.openingAt)) errs.push('submissionCloseAt must be at or before openingAt.');
     if (!(gates.openingAt < gates.openingEndAt)) errs.push('openingAt must be before openingEndAt.');
     if (constants && gates.openingEndAt - gates.openingAt < constants.minRevealWindow) {
-      errs.push(`Reveal window (openingEndAt − openingAt) must be at least MinRevealWindow = ${constants.minRevealWindow} blocks.`);
+      errs.push(`Opening must stay open at least ${blocksToDuration(constants.minRevealWindow, blockSeconds)} (MinRevealWindow = ${constants.minRevealWindow} blocks).`);
     }
     if (constants && gates.standstillPeriod < constants.minStandstillPeriod) {
-      errs.push(`Standstill period must be at least MinStandstillPeriod = ${constants.minStandstillPeriod} blocks.`);
+      errs.push(`Standstill period must be at least ${blocksToDuration(constants.minStandstillPeriod, blockSeconds)} (MinStandstillPeriod = ${constants.minStandstillPeriod} blocks).`);
     }
     return errs;
-  }, [gates, constants]);
+  }, [gates, constants, blockSeconds]);
 
   const buffer = gates.submissionCloseAt - currentBlock;
   const lowBuffer = buffer < 200;
 
-  const basicsValid = title.trim() && summary.trim() && entity.trim() && officer;
-  const criteriaValid = criteria.length > 0 && totalWeight === 100 && criteria.every((c) => c.name.trim());
-  const gatesValid = gateErrors.length === 0;
+  // Byte lengths, because the pallet bounds `title`/`summary` as `BoundedVec<u8>`
+  // and a non-ASCII character takes more than one byte.
+  const byteLen = (v: string) => new TextEncoder().encode(v).length;
 
-  const stepValid = [basicsValid, criteriaValid, gatesValid, true, true][step];
+  // Every reason the current step cannot advance, spelled out — a greyed-out
+  // Next button with no explanation is indistinguishable from a broken one.
+  const basicsIssues: string[] = [];
+  if (!title.trim()) basicsIssues.push('Enter a title.');
+  else if (byteLen(title.trim()) > MAX_TITLE_BYTES) basicsIssues.push(`Title is too long (max ${MAX_TITLE_BYTES} bytes).`);
+  if (!summary.trim()) basicsIssues.push('Enter a summary.');
+  else if (byteLen(summary.trim()) > MAX_SUMMARY_BYTES) basicsIssues.push(`Summary is too long (max ${MAX_SUMMARY_BYTES} bytes).`);
+  if (!entity.trim()) basicsIssues.push('Enter the procuring entity.');
+  if (!officer) basicsIssues.push('Pick an officer account — switch an account to the Officer role in the header if none is listed.');
+  if (bidMode === 'Open' && kind !== 'RFQ') basicsIssues.push('Open bidding is only allowed for a Request for Quote (RFQ). Choose Sealed, or change the kind to RFQ.');
+
+  const criteriaIssues: string[] = [];
+  if (criteria.length === 0) criteriaIssues.push('Add at least one criterion.');
+  if (totalWeight !== 100) criteriaIssues.push(`Weights add up to ${totalWeight}% — they must total exactly 100%.`);
+  if (criteria.some((c) => !c.name.trim())) criteriaIssues.push('Every criterion needs a name.');
+  if (criteria.some((c) => c.weight < 0 || c.weight > 100 || !Number.isInteger(c.weight))) criteriaIssues.push('Weights must be whole numbers between 0 and 100.');
+
+  const bondIssues: string[] = [];
+  if (!/^\d+$/.test(bondAmount.trim() || '0')) bondIssues.push('Bond amount must be a whole number (in the chain’s smallest unit), e.g. 0 or 1000.');
+  if (!Number.isInteger(minReputation) || minReputation < 0) bondIssues.push('Minimum reputation must be a whole number ≥ 0.');
+
+  const stepIssues = [basicsIssues, criteriaIssues, gateErrors, bondIssues, [...basicsIssues, ...criteriaIssues, ...gateErrors, ...bondIssues]][step];
+  const stepValid = stepIssues.length === 0;
 
   const updateCriterion = (id: string, patch: Partial<Criterion>) =>
     setCriteria(criteria.map((c) => (c.id === id ? { ...c, ...patch } : c)));
@@ -164,13 +245,13 @@ export function CreateTenderWizard() {
   const removeCriterion = (id: string) => setCriteria(criteria.filter((c) => c.id !== id));
 
   const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<ErrorView | null>(null);
 
   const submit = async () => {
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await chainApi.createTender({
+      const created = await chainApi.createTender({
         title: title.trim(),
         summary: summary.trim(),
         entity: entity.trim(),
@@ -183,13 +264,15 @@ export function CreateTenderWizard() {
           requiredCredentials: credentials.split(',').map((c) => c.trim()).filter(Boolean),
           minReputation,
         },
-        bond: { amount: bondAmount, currency: bondCurrency, forfeitOnWithdrawal },
+        bond: { amount: bondAmount.trim() || '0', currency: bondCurrency, forfeitOnWithdrawal },
         blindQuestions,
         shortlistFromTenderId: kind === 'RFT' && shortlistFromTenderId ? shortlistFromTenderId : undefined,
       });
-      navigate('/');
+      // Straight to the new draft, where it can be reviewed, published or deleted.
+      navigate(`/tenders/${created.id}`);
     } catch (err) {
-      setSubmitError(describeChainError(err));
+      console.error('[tenderchain] create_tender failed', err);
+      setSubmitError(explainError(err));
       setSubmitting(false);
     }
   };
@@ -236,14 +319,25 @@ export function CreateTenderWizard() {
                   </Field>
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Tender kind">
-                      <select value={kind} onChange={(e) => setKind(e.target.value as TenderKind)} className="input">
+                      <select
+                        value={kind}
+                        onChange={(e) => {
+                          const next = e.target.value as TenderKind;
+                          setKind(next);
+                          // `create_tender` refuses open bidding outside an RFQ.
+                          if (next !== 'RFQ') setBidMode('Sealed');
+                        }}
+                        className="input"
+                      >
                         {Object.entries(TENDER_KIND_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
                       </select>
                     </Field>
                     <Field label="Bid mode">
                       <select value={bidMode} onChange={(e) => setBidMode(e.target.value as BidMode)} className="input">
                         <option value="Sealed">Sealed (commit → reveal)</option>
-                        <option value="Open">Open</option>
+                        <option value="Open" disabled={kind !== 'RFQ'}>
+                          Open{kind !== 'RFQ' ? ' (RFQ only)' : ''}
+                        </option>
                       </select>
                     </Field>
                   </div>
@@ -327,29 +421,21 @@ export function CreateTenderWizard() {
                       ['openingEndAt', 'Opening ends at'],
                     ] as [keyof GateForm, string][]
                   ).map(([key, label]) => (
-                    <Field key={key} label={`${label} (block number)`}>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="number"
-                          value={gates[key]}
-                          onChange={(e) => setPinnedGates({ ...gates, [key]: Number(e.target.value) })}
-                          className="input w-40"
-                        />
-                        <span className="text-xs text-slate-400">
-                          ≈ {gates[key] > currentBlock ? `in ${blocksToDuration(gates[key] - currentBlock, constants?.avgBlockTimeSeconds ?? 6)}` : 'in the past'} ({formatBlock(gates[key])})
-                        </span>
-                      </div>
+                    <Field key={key} label={`${label} (time from now)`}>
+                      <DurationInput value={durations[key]} onChange={(patch) => setDuration(key, patch)}>
+                        → block {formatBlock(gates[key])}
+                      </DurationInput>
                     </Field>
                   ))}
                   <div className={`rounded-md border border-dashed p-3 ${gatesPinned ? 'border-slate-300' : 'border-emerald-300 bg-emerald-50/40'}`}>
                     <div className="flex items-center justify-between gap-2">
                       <span className="text-xs font-medium text-slate-700">
-                        {gatesPinned ? 'Gates pinned to the numbers you typed' : `⚡ Auto: ~${TEST_RUN_MINUTES}-minute test run`}
+                        {gatesPinned ? 'Using the times you entered' : `⚡ Auto: ~${TEST_RUN_MINUTES}-minute test run`}
                       </span>
                       {gatesPinned && (
                         <button
                           type="button"
-                          onClick={() => setPinnedGates(null)}
+                          onClick={() => setPinnedDurations(null)}
                           className="rounded-md border border-slate-300 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:bg-slate-50"
                         >
                           ↺ Back to the {TEST_RUN_MINUTES}-minute test gates
@@ -359,14 +445,13 @@ export function CreateTenderWizard() {
                     <p className="mt-1.5 text-xs text-slate-500">
                       {gatesPinned ? (
                         <>
-                          These are absolute block numbers and will not move again — the chain is at{' '}
-                          {formatBlock(currentBlock)} now, so re-read them before you hit Create.
+                          Times are counted from the live head ({formatBlock(currentBlock)}) and converted to block
+                          numbers at ~{blockSeconds}s per block when you hit Create.
                         </>
                       ) : (
                         <>
-                          Every gate is re-derived from the live head ({formatBlock(currentBlock)}) on each new block, so
-                          it stays correct however long you spend on the earlier steps. Type in any field above to pin
-                          your own numbers instead.
+                          Every gate is counted from the live head ({formatBlock(currentBlock)}), so it stays correct
+                          however long you spend on the earlier steps. Change any time above to set your own schedule.
                         </>
                       )}{' '}
                       The reveal window still has to clear MinRevealWindow ({constants?.minRevealWindow ?? 100} blocks ≈{' '}
@@ -379,13 +464,10 @@ export function CreateTenderWizard() {
                     </p>
                   </div>
 
-                  <Field label="Standstill period (blocks, after award approval)">
-                    <input
-                      type="number"
-                      value={gates.standstillPeriod}
-                      onChange={(e) => setPinnedGates({ ...gates, standstillPeriod: Number(e.target.value) })}
-                      className="input w-40"
-                    />
+                  <Field label="Standstill period (after award approval)">
+                    <DurationInput value={durations.standstillPeriod} onChange={(patch) => setDuration('standstillPeriod', patch)}>
+                      = {gates.standstillPeriod.toLocaleString()} blocks
+                    </DurationInput>
                   </Field>
 
                   {gateErrors.length > 0 && (
@@ -395,7 +477,7 @@ export function CreateTenderWizard() {
                   )}
                   {gateErrors.length === 0 && gatesPinned && lowBuffer && (
                     <p className="rounded-md bg-amber-50 p-3 text-xs text-amber-700">
-                      ⚠ Only {buffer.toLocaleString()} blocks between now and submission close — consider more buffer for bidders to respond.
+                      ⚠ Only {blocksToDuration(buffer, blockSeconds)} between now and submission close — consider more buffer for bidders to respond.
                     </p>
                   )}
                 </div>
@@ -431,7 +513,7 @@ export function CreateTenderWizard() {
                   <SummaryRow label="Kind / Mode" value={`${TENDER_KIND_LABEL[kind]} · ${bidMode}`} />
                   <SummaryRow label="Criteria" value={criteria.map((c) => `${c.name} (${c.weight}%)`).join(', ')} />
                   <SummaryRow label="Gates" value={`publish #${gates.publishAt} → Q&A close #${gates.questionsCloseAt} → submission close #${gates.submissionCloseAt} → opening #${gates.openingAt}-${gates.openingEndAt}`} />
-                  <SummaryRow label="Standstill" value={`${gates.standstillPeriod} blocks`} />
+                  <SummaryRow label="Standstill" value={`${blocksToDuration(gates.standstillPeriod, blockSeconds)} (${gates.standstillPeriod} blocks)`} />
                   <SummaryRow
                     label="Full run"
                     value={`${runLength(gates, currentBlock).toLocaleString()} blocks ≈ ${blocksToDuration(
@@ -445,14 +527,24 @@ export function CreateTenderWizard() {
                     The tender will be created in <strong>Draft</strong> state. Publish it from the tender detail page when ready — publication is a separate on-chain action so you can review first.
                   </p>
                   {submitError && (
-                    <p className="rounded-md bg-red-50 p-3 text-xs text-red-700">
-                      Failed to create tender: {submitError}
-                    </p>
+                    <div>
+                      <p className="text-xs font-semibold text-red-700">The chain refused to create this tender:</p>
+                      <ActionError error={submitError} onDismiss={() => setSubmitError(null)} />
+                    </div>
                   )}
                 </div>
               )}
             </CardBody>
           </Card>
+
+          {!stepValid && (
+            <div role="status" className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2.5 text-xs text-amber-800">
+              <p className="font-semibold">Fix the following to continue:</p>
+              <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                {stepIssues.map((m) => <li key={m}>{m}</li>)}
+              </ul>
+            </div>
+          )}
 
           <div className="mt-4 flex justify-between">
             <button
@@ -473,7 +565,7 @@ export function CreateTenderWizard() {
             ) : (
               <button
                 onClick={submit}
-                disabled={submitting}
+                disabled={submitting || !stepValid}
                 className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-60"
               >
                 {submitting ? 'Creating…' : 'Create draft tender'}
@@ -520,6 +612,39 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="mb-1 block text-xs font-medium text-slate-500">{label}</span>
       {children}
     </label>
+  );
+}
+
+function DurationInput({
+  value,
+  onChange,
+  children,
+}: {
+  value: Duration;
+  onChange: (patch: Partial<Duration>) => void;
+  children?: React.ReactNode;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="number"
+        min={0}
+        step="any"
+        value={value.value}
+        onChange={(e) => onChange({ value: Number(e.target.value) })}
+        className="input w-28"
+      />
+      <select
+        value={value.unit}
+        onChange={(e) => onChange({ unit: e.target.value as TimeUnit })}
+        className="input w-32"
+      >
+        {(Object.keys(UNIT_LABEL) as TimeUnit[]).map((u) => (
+          <option key={u} value={u}>{UNIT_LABEL[u]}</option>
+        ))}
+      </select>
+      {children && <span className="text-xs text-slate-400">{children}</span>}
+    </div>
   );
 }
 

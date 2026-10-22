@@ -25,8 +25,9 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
       !bidders.has(a.address) &&
       a.address !== tender.officer,
   );
-  // The pallet only freezes the panel once the tender is contracted or cancelled.
-  const canAppoint = tender.state !== 'Contracted' && tender.state !== 'Cancelled';
+  // The pallet freezes the panel once the tender is contracted, cancelled or
+  // (for an EOI) shortlisted — the portal shows `Shortlisted` as `Awarded`.
+  const canAppoint = !['Contracted', 'Cancelled'].includes(tender.state) && !(tender.kind === 'EOI' && tender.state === 'Awarded');
   const nameFor = (addr: string) => accounts.find((a) => a.address === addr)?.name ?? addr;
 
   const appoint = () => {
@@ -38,7 +39,8 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
   };
 
   const rankings = computeRankings(tender);
-  const enoughEvaluators = tender.evaluators.length >= (constants?.minEvaluators ?? 3);
+  // `award` counts *activated* evaluators, not appointed ones.
+  const enoughEvaluators = tender.activeEvaluators.length >= (constants?.minEvaluators ?? 3);
 
   return (
     <Card>
@@ -46,7 +48,7 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
         title={`Evaluator panel (${tender.evaluators.length})`}
         subtitle={
           constants
-            ? `Requires MinEvaluators = ${constants.minEvaluators}${enoughEvaluators ? '' : ' — not yet met'}`
+            ? `${tender.activeEvaluators.length} active · award needs MinEvaluators = ${constants.minEvaluators} active${enoughEvaluators ? '' : ' — not yet met'}`
             : undefined
         }
       />
@@ -65,9 +67,13 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
                       <span title={decl.notes} className="rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-medium text-red-700">
                         Conflict declared
                       </span>
-                    ) : (
+                    ) : tender.activeEvaluators.includes(addr) ? (
                       <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">
-                        No conflict · declared {formatBlock(decl.declaredAtBlock)}
+                        No conflict · active (appointed {formatBlock(decl.declaredAtBlock)})
+                      </span>
+                    ) : (
+                      <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">
+                        No conflict · awaiting activation
                       </span>
                     )
                   ) : (

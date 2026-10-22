@@ -33,6 +33,13 @@ function decodeDispatchError(api: ApiPromise, dispatchError: unknown): ChainCall
       /* fall through to the raw form */
     }
   }
+  // Non-module errors (`BadOrigin`, `Token(FundsUnavailable)`, …) are enums
+  // whose `toString()` is JSON; their variant name is the readable part.
+  const typed = dispatchError as { type?: string; isToken?: boolean; asToken?: { type?: string } };
+  if (typed?.type) {
+    const inner = typed.isToken ? typed.asToken?.type : undefined;
+    return new ChainCallError(inner ? `${typed.type}.${inner}` : typed.type);
+  }
   return new ChainCallError(String(dispatchError));
 }
 

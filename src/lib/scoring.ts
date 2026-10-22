@@ -7,11 +7,15 @@ export interface BidRanking {
   totalPrice: number;
   weightedScore: number; // 0-100
   evaluatorCount: number;
-  perCriterion: { criterionId: string; name: string; weight: number; avgScore: number; maxScore: number; variance: number }[];
+  /** `spread` is max − min across evaluators: what the chain's variance flag measures. */
+  perCriterion: { criterionId: string; name: string; weight: number; avgScore: number; maxScore: number; variance: number; spread: number }[];
 }
 
 export function computeRankings(tender: Tender): BidRanking[] {
+  // Voided reveals are excluded from the ranking, exactly as the pallet's
+  // `compute_ranking` excludes them.
   return tender.revealedBids
+    .filter((bid) => !bid.disqualified)
     .map((bid) => {
       const scoreSets = tender.scores.filter((s) => s.bidId === bid.id);
       const perCriterion = tender.criteria.map((c) => {
@@ -24,7 +28,8 @@ export function computeRankings(tender: Tender): BidRanking[] {
         const variance = scoresForCriterion.length
           ? Math.sqrt(scoresForCriterion.reduce((a, b) => a + (b - avg) ** 2, 0) / scoresForCriterion.length)
           : 0;
-        return { criterionId: c.id, name: c.name, weight: c.weight, avgScore: avg, maxScore: c.maxScore, variance };
+        const spread = scoresForCriterion.length ? Math.max(...scoresForCriterion) - Math.min(...scoresForCriterion) : 0;
+        return { criterionId: c.id, name: c.name, weight: c.weight, avgScore: avg, maxScore: c.maxScore, variance, spread };
       });
       const weightedScore = perCriterion.reduce((sum, c) => sum + (c.avgScore / c.maxScore) * c.weight, 0);
       return {
@@ -40,12 +45,14 @@ export function computeRankings(tender: Tender): BidRanking[] {
     .sort((a, b) => b.weightedScore - a.weightedScore);
 }
 
-/** Flags an evaluator's score on a criterion as an outlier if it diverges from the peer mean by more than this many points. */
-export const VARIANCE_FLAG_THRESHOLD = 15;
+/** The runtime's `ScoreVarianceThreshold`, used until constants arrive. */
+export const VARIANCE_FLAG_THRESHOLD = 30;
 
-export function isOutlierScore(myScore: number, peerScores: number[]): boolean {
-  const others = peerScores;
-  if (others.length === 0) return false;
-  const mean = others.reduce((a, b) => a + b, 0) / others.length;
-  return Math.abs(myScore - mean) > VARIANCE_FLAG_THRESHOLD;
+/**
+ * Whether submitting `myScore` will make the chain emit `ScoreVarianceFlagged`:
+ * the pallet compares pairwise against every other evaluator's score on the
+ * same criterion and flags any spread strictly above the threshold.
+ */
+export function isOutlierScore(myScore: number, peerScores: number[], threshold = VARIANCE_FLAG_THRESHOLD): boolean {
+  return peerScores.some((p) => Math.abs(myScore - p) > threshold);
 }

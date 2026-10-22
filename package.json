@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "deploy": "bash scripts/deploy.sh"
+    "deploy": "bash scripts/deploy.sh",
+    "test:e2e": "vite-node scripts/e2e.ts"
   },
   "dependencies": {
     "@polkadot/api": "^16.5.6",

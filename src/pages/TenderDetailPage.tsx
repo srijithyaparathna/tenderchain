@@ -18,18 +18,20 @@ import { BidActionPanel } from '../components/tender/BidActionPanel';
 import { EvaluatorScoringPanel } from '../components/tender/EvaluatorScoringPanel';
 import { TENDER_KIND_LABEL, type Tender } from '../types';
 import { useApp } from '../state/AppContext';
+import { ActionError } from '../components/common/ActionError';
 import { computeRankings, type BidRanking } from '../lib/scoring';
 
 export function TenderDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { tender, loading } = useTender(id);
+  const { tender, loading, error } = useTender(id);
   const { accounts } = useApp();
 
   if (loading) return <div className="py-20 text-center text-sm text-slate-400">Loading…</div>;
   if (!tender) {
     return (
       <div className="mx-auto max-w-3xl px-4 py-16 text-center">
-        <p className="text-sm text-slate-500">Tender not found.</p>
+        <p className="text-sm text-slate-500">Tender not found — it may have been deleted, or the id is wrong.</p>
+        {error && <div className="mt-3 text-left"><ActionError error={error} /></div>}
         <Link to="/" className="mt-2 inline-block text-sm text-blue-600 hover:underline">← Back to marketplace</Link>
       </div>
     );
@@ -119,6 +121,8 @@ function EligibilityCard({ tender }: { tender: Tender }) {
 
 function ScoresBreakdown({ tender }: { tender: Tender }) {
   const rankings = computeRankings(tender);
+  const { constants } = useApp();
+  const threshold = constants?.scoreVarianceThreshold ?? 30;
   return (
     <Card>
       <CardHeader title="Evaluation results" subtitle="Weighted score = Σ (average criterion score / max score × weight)." />
@@ -143,7 +147,7 @@ function ScoresBreakdown({ tender }: { tender: Tender }) {
                   {r.perCriterion.map((c) => (
                     <td key={c.criterionId} className="py-2 pr-3 text-slate-600">
                       {c.avgScore.toFixed(0)}/{c.maxScore}
-                      {c.variance > 15 && <span title="High variance between evaluators" className="ml-1 text-amber-500">⚠</span>}
+                      {c.spread > threshold && <span title={`Evaluators differ by ${c.spread} points — above the chain's variance threshold of ${threshold}; flagged for probity review.`} className="ml-1 text-amber-500">⚠</span>}
                     </td>
                   ))}
                   <td className="py-2 font-semibold text-slate-900">{r.weightedScore.toFixed(1)}</td>
