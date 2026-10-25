@@ -7,6 +7,7 @@ import { Stepper } from '../components/common/Stepper';
 import { formatBlock } from '../lib/blocks';
 import { useApp } from '../state/AppContext';
 import { computeRankings } from '../lib/scoring';
+import { Select } from '../components/common/Select';
 
 export function PublicAuditPage() {
   const { tenders } = useTenders();
@@ -28,18 +29,19 @@ export function PublicAuditPage() {
 
       <label className="mb-5 block">
         <span className="mb-1 block text-xs font-medium text-slate-500">Select a tender to audit</span>
-        <select value={selected} onChange={(e) => setSelected(e.target.value)} className="w-full max-w-md rounded-md border border-slate-300 px-3 py-2 text-sm outline-none focus:border-blue-400">
-          <option value="">— Select —</option>
-          {tenders.map((t) => {
-            // Titles are not unique; a short id only appears when two collide.
-            const clash = tenders.some((o) => o.id !== t.id && o.title === t.title);
-            return (
-              <option key={t.id} value={t.id} title={t.id}>
-                {clash ? `${t.title} (${t.id.slice(0, 8)}…)` : t.title}
-              </option>
-            );
-          })}
-        </select>
+        <Select
+          className="w-full max-w-md"
+          value={selected}
+          onChange={setSelected}
+          options={[
+            { value: '', label: '— Select —' },
+            ...tenders.map((t) => {
+              // Titles are not unique; a short id only appears when two collide.
+              const clash = tenders.some((o) => o.id !== t.id && o.title === t.title);
+              return { value: t.id, title: t.id, label: clash ? `${t.title} (${t.id.slice(0, 8)}…)` : t.title };
+            }),
+          ]}
+        />
       </label>
 
       {!tender ? (

@@ -9,6 +9,7 @@ import { useApp } from '../../state/AppContext';
 import { requireOfficer } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
 import { computeRankings } from '../../lib/scoring';
+import { Select } from '../common/Select';
 
 export function OfficerActionsPanel({ tender }: { tender: Tender }) {
   const { currentAccount, currentBlock } = useApp();
@@ -119,12 +120,15 @@ export function OfficerActionsPanel({ tender }: { tender: Tender }) {
               ))}
             </ul>
             {/* A voided reveal can never be awarded (`InvalidAwardee`), so it is not offered. */}
-            <select value={awardBidId} onChange={(e) => setAwardBidId(e.target.value)} className="mb-2 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-400">
-              <option value="">Select awardee…</option>
-              {tender.revealedBids.filter((b) => !b.disqualified).map((b) => (
-                <option key={b.id} value={b.id}>{b.bidderName}</option>
-              ))}
-            </select>
+            <Select
+              className="mb-2 w-full"
+              value={awardBidId}
+              onChange={setAwardBidId}
+              options={[
+                { value: '', label: 'Select awardee…' },
+                ...tender.revealedBids.filter((b) => !b.disqualified).map((b) => ({ value: b.id, label: b.bidderName })),
+              ]}
+            />
             {tender.revealedBids.every((b) => b.disqualified) && (
               <p className="mb-2 text-xs text-slate-500">No valid revealed bids — there is nothing to award. Cancel the tender instead.</p>
             )}

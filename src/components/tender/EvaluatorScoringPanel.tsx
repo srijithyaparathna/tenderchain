@@ -9,6 +9,7 @@ import { requireEvaluator } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
 import { contentHash } from '../../lib/hashing';
 import { isOutlierScore } from '../../lib/scoring';
+import { Select } from '../common/Select';
 
 export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
   const { currentAccount, constants } = useApp();
@@ -129,13 +130,16 @@ export function EvaluatorScoringPanel({ tender }: { tender: Tender }) {
       <CardHeader title="Score bids" subtitle={`Max ${maxScore} per criterion, capped automatically.`} />
       <CardBody>
         <label className="mb-1 block text-xs font-medium text-slate-500">Bid</label>
-        <select value={bidId} onChange={(e) => setBidId(e.target.value)} className="mb-3 w-full rounded-md border border-slate-300 px-2.5 py-1.5 text-sm outline-none focus:border-blue-400">
-          <option value="">Select a bid to score…</option>
-          {/* Voided reveals cannot be scored (`BidNotScoreable`). */}
-          {tender.revealedBids.filter((b) => !b.disqualified).map((b) => (
-            <option key={b.id} value={b.id}>{b.bidderName} — {b.totalPrice.toLocaleString()}</option>
-          ))}
-        </select>
+        <Select
+          className="mb-3 w-full"
+          value={bidId}
+          onChange={setBidId}
+          options={[
+            { value: '', label: 'Select a bid to score…' },
+            // Voided reveals cannot be scored (`BidNotScoreable`).
+            ...tender.revealedBids.filter((b) => !b.disqualified).map((b) => ({ value: b.id, label: `${b.bidderName} — ${b.totalPrice.toLocaleString()}` })),
+          ]}
+        />
 
         {already && (
           <p className="mb-2 rounded-md bg-blue-50 p-2 text-xs text-blue-700">You already scored this bid — resubmitting will overwrite it.</p>

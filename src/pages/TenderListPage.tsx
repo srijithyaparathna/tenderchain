@@ -8,6 +8,7 @@ import { TENDER_KIND_LABEL, type TenderKind, type TenderState } from '../types';
 import { nextGate } from '../lib/gates';
 import { useApp } from '../state/AppContext';
 import { ActionError } from '../components/common/ActionError';
+import { Select } from '../components/common/Select';
 
 const ALL_STATES: (TenderState | 'All')[] = [
   'All', 'Draft', 'Published', 'Submission', 'Closed', 'Opening', 'Evaluation', 'Standstill', 'Contracted', 'Cancelled',
@@ -151,17 +152,13 @@ function FilterSelect<T extends string>({
   return (
     <label className="flex items-center gap-1.5 text-xs text-slate-500">
       {label}
-      <select
+      <Select
+        size="sm"
+        className="w-auto"
         value={value}
-        onChange={(e) => onChange(e.target.value as T)}
-        className="rounded-md border border-slate-300 px-2 py-1.5 text-xs font-medium text-slate-700 outline-none focus:border-blue-400"
-      >
-        {options.map((o) => (
-          <option key={o} value={o}>
-            {render ? render(o) : o}
-          </option>
-        ))}
-      </select>
+        onChange={onChange}
+        options={options.map((o) => ({ value: o, label: render ? render(o) : o }))}
+      />
     </label>
   );
 }

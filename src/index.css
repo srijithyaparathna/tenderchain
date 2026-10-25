@@ -43,6 +43,15 @@ body {
     outline: none;
   }
 
+  /* No resize grip: its diagonal hatching drew stray lines inside the box.
+     Where supported the box grows with its text instead. */
+  textarea.input {
+    resize: none;
+    field-sizing: content;
+    min-height: 5rem;
+    max-height: 16rem;
+  }
+
   .input:focus {
     border-color: var(--color-blue-400);
   }

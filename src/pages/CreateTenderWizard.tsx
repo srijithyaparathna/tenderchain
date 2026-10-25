@@ -10,6 +10,7 @@ import { weightSum } from '../lib/gates';
 import { blocksToDuration, formatBlock } from '../lib/blocks';
 import { explainError, type ErrorView } from '../lib/errors';
 import { ActionError } from '../components/common/ActionError';
+import { Select } from '../components/common/Select';
 
 /** `MaxTitleLen` / `MaxSummaryLen` in this runtime (bytes). */
 const MAX_TITLE_BYTES = 128;
@@ -312,33 +313,33 @@ export function CreateTenderWizard() {
                     <input value={entity} onChange={(e) => setEntity(e.target.value)} className="input" placeholder="e.g. Department of Works" />
                   </Field>
                   <Field label="Officer account">
-                    <select value={officer} onChange={(e) => setOfficer(e.target.value)} className="input">
-                      <option value="">Select officer…</option>
-                      {officers.map((o) => <option key={o.address} value={o.address}>{o.name}</option>)}
-                    </select>
+                    <Select
+                      value={officer}
+                      onChange={setOfficer}
+                      options={[{ value: '', label: 'Select officer…' }, ...officers.map((o) => ({ value: o.address, label: o.name }))]}
+                    />
                   </Field>
                   <div className="grid grid-cols-2 gap-3">
                     <Field label="Tender kind">
-                      <select
+                      <Select
                         value={kind}
-                        onChange={(e) => {
-                          const next = e.target.value as TenderKind;
+                        onChange={(next) => {
                           setKind(next);
                           // `create_tender` refuses open bidding outside an RFQ.
                           if (next !== 'RFQ') setBidMode('Sealed');
                         }}
-                        className="input"
-                      >
-                        {Object.entries(TENDER_KIND_LABEL).map(([k, l]) => <option key={k} value={k}>{l}</option>)}
-                      </select>
+                        options={(Object.entries(TENDER_KIND_LABEL) as [TenderKind, string][]).map(([k, l]) => ({ value: k, label: l }))}
+                      />
                     </Field>
                     <Field label="Bid mode">
-                      <select value={bidMode} onChange={(e) => setBidMode(e.target.value as BidMode)} className="input">
-                        <option value="Sealed">Sealed (commit → reveal)</option>
-                        <option value="Open" disabled={kind !== 'RFQ'}>
-                          Open{kind !== 'RFQ' ? ' (RFQ only)' : ''}
-                        </option>
-                      </select>
+                      <Select<BidMode>
+                        value={bidMode}
+                        onChange={setBidMode}
+                        options={[
+                          { value: 'Sealed', label: 'Sealed (commit → reveal)' },
+                          { value: 'Open', label: `Open${kind !== 'RFQ' ? ' (RFQ only)' : ''}`, disabled: kind !== 'RFQ' },
+                        ]}
+                      />
                     </Field>
                   </div>
                   <label className="flex items-center gap-2 text-sm text-slate-600">
@@ -347,10 +348,14 @@ export function CreateTenderWizard() {
                   </label>
                   {kind === 'RFT' && (
                     <Field label="Shortlist from EOI (optional)">
-                      <select value={shortlistFromTenderId} onChange={(e) => setShortlistFromTenderId(e.target.value)} className="input">
-                        <option value="">None — open to all eligible bidders</option>
-                        {eoiTenders.map((t) => <option key={t.id} value={t.id}>{t.id} — {t.title}</option>)}
-                      </select>
+                      <Select
+                        value={shortlistFromTenderId}
+                        onChange={setShortlistFromTenderId}
+                        options={[
+                          { value: '', label: 'None — open to all eligible bidders' },
+                          ...eoiTenders.map((t) => ({ value: t.id, label: `${t.id} — ${t.title}`, title: t.id })),
+                        ]}
+                      />
                     </Field>
                   )}
                 </div>
@@ -360,7 +365,7 @@ export function CreateTenderWizard() {
                 <div>
                   <div className="space-y-2.5">
                     {criteria.map((c) => (
-                      <div key={c.id} className="rounded-md border border-slate-100 p-2.5">
+                      <div key={c.id} className="rounded-md bg-slate-50 p-2.5">
                         {/* Grid, not flex: the weight field's width has to win over `.input`'s
                             own `width: 100%`, and fighting that with a `w-20` utility on the
                             input itself is exactly the losing battle that produced a full-width
@@ -634,15 +639,13 @@ function DurationInput({
         onChange={(e) => onChange({ value: Number(e.target.value) })}
         className="input w-28"
       />
-      <select
+      <Select
+        className="w-32 shrink-0"
         value={value.unit}
-        onChange={(e) => onChange({ unit: e.target.value as TimeUnit })}
-        className="input w-32"
-      >
-        {(Object.keys(UNIT_LABEL) as TimeUnit[]).map((u) => (
-          <option key={u} value={u}>{UNIT_LABEL[u]}</option>
-        ))}
-      </select>
+        onChange={(unit) => onChange({ unit })}
+        aria-label="Unit"
+        options={(Object.keys(UNIT_LABEL) as TimeUnit[]).map((u) => ({ value: u, label: UNIT_LABEL[u] }))}
+      />
       {children && <span className="text-xs text-slate-400">{children}</span>}
     </div>
   );

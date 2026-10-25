@@ -9,6 +9,7 @@ import { requireOfficer } from '../../lib/permissions';
 import { chainApi } from '../../services/api';
 import { computeRankings } from '../../lib/scoring';
 import { formatBlock } from '../../lib/blocks';
+import { Select } from '../common/Select';
 
 export function EvaluatorPanel({ tender }: { tender: Tender }) {
   const { accounts, currentAccount, constants } = useApp();
@@ -87,16 +88,16 @@ export function EvaluatorPanel({ tender }: { tender: Tender }) {
 
         {canAppoint && (!enoughEvaluators || evaluatorPool.length > 0) && (
           <div className="mb-3 flex flex-wrap items-center gap-2 rounded-md bg-slate-50 p-2.5">
-            <select
+            <Select
+              size="sm"
+              className="w-auto"
               value={pick}
-              onChange={(e) => setPick(e.target.value)}
-              className="rounded-md border border-slate-300 px-2 py-1.5 text-xs outline-none focus:border-blue-400"
-            >
-              <option value="">Select an evaluator to appoint…</option>
-              {evaluatorPool.map((a) => (
-                <option key={a.address} value={a.address}>{a.name}</option>
-              ))}
-            </select>
+              onChange={setPick}
+              options={[
+                { value: '', label: 'Select an evaluator to appoint…' },
+                ...evaluatorPool.map((a) => ({ value: a.address, label: a.name })),
+              ]}
+            />
             <RoleGatedButton variant="secondary" disabledReason={requireOfficer(currentAccount, tender) || (!pick ? 'Choose an evaluator first.' : undefined)} disabled={busy} onClick={appoint}>
               Appoint
             </RoleGatedButton>

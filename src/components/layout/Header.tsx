@@ -5,6 +5,7 @@ import type { Role } from '../../types';
 import { formatBlock } from '../../lib/blocks';
 import { chainApi } from '../../services/api';
 import { describeChainError } from '../../lib/errors';
+import { Select } from '../common/Select';
 
 const NAV = [
   { to: '/', label: 'Tenders', end: true },
@@ -103,42 +104,39 @@ export function Header() {
             <span className="mono text-xs font-medium text-slate-700">{chain.text}</span>
           </div>
 
-          <div className="relative">
-            <select
-              className={`appearance-none rounded-md border border-slate-300 py-1.5 pl-3 pr-7 text-xs font-medium outline-none ${currentAccount ? roleColor(currentAccount.role) : 'bg-white'}`}
-              value={currentAccount?.address ?? ''}
-              onChange={(e) => {
-                const acc = accounts.find((a) => a.address === e.target.value) ?? null;
-                setCurrentAccount(acc);
-              }}
-              title={
-                accountSource === 'extension'
-                  ? 'Accounts injected by your polkadot{.js} extension'
-                  : accountSource === 'dev'
-                    ? 'Well-known --dev accounts (no extension detected)'
-                    : 'Demo wallet switcher'
-              }
-            >
-              <option value="">Disconnected (Public)</option>
-              {accounts.map((a) => (
-                <option key={a.address} value={a.address}>
-                  {a.name} · {a.address.slice(0, 6)}…{a.address.slice(-4)}
-                </option>
-              ))}
-            </select>
-          </div>
+          <Select
+            size="sm"
+            align="right"
+            className="w-auto min-w-0 max-w-[9rem] sm:max-w-xs"
+            triggerClassName={currentAccount ? roleColor(currentAccount.role) : 'bg-white text-slate-700'}
+            value={currentAccount?.address ?? ''}
+            onChange={(address) => setCurrentAccount(accounts.find((a) => a.address === address) ?? null)}
+            aria-label="Account"
+            title={
+              accountSource === 'extension'
+                ? 'Accounts injected by your polkadot{.js} extension'
+                : accountSource === 'dev'
+                  ? 'Well-known --dev accounts (no extension detected)'
+                  : 'Demo wallet switcher'
+            }
+            options={[
+              { value: '', label: 'Disconnected (Public)' },
+              ...accounts.map((a) => ({ value: a.address, label: `${a.name} · ${a.address.slice(0, 6)}…${a.address.slice(-4)}` })),
+            ]}
+          />
 
           {currentAccount && (
-            <select
-              className={`appearance-none rounded-md border border-slate-300 py-1.5 pl-3 pr-7 text-xs font-medium outline-none ${roleColor(currentAccount.role)}`}
+            <Select
+              size="sm"
+              align="right"
+              className="w-auto"
+              triggerClassName={roleColor(currentAccount.role)}
               value={currentAccount.role}
-              onChange={(e) => setCurrentAccount({ ...currentAccount, role: e.target.value as Role })}
+              onChange={(role) => setCurrentAccount({ ...currentAccount, role })}
+              aria-label="Role"
               title="The pallet has no role registry — an account is an officer because it created a tender, an evaluator because it was appointed to one. Pick the role to act in."
-            >
-              {ROLES.map((r) => (
-                <option key={r} value={r}>{r}</option>
-              ))}
-            </select>
+              options={ROLES.map((r) => ({ value: r, label: r }))}
+            />
           )}
         </div>
       </div>
